@@ -1,4 +1,4 @@
-﻿"""Loading Qwen3-VL on 24 GB and turning on LoRA.
+"""Loading Qwen3-VL on 24 GB and turning on LoRA.
 
 Presets are deliberately conservative: a first run that fits is worth more than
 a run that is 10% faster and OOMs.
@@ -74,7 +74,7 @@ def load_model(cfg: ModelConfig):
     import torch
     from transformers import AutoProcessor, Qwen3VLForConditionalGeneration
 
-    kwargs: Dict[str, Any] = {"device_map": {"": 0}, "torch_dtype": torch.bfloat16, "low_cpu_mem_usage": True}
+    kwargs: Dict[str, Any] = {"device_map": {"": 0}, "low_cpu_mem_usage": True}
     attn = cfg.attn_implementation
     if attn == "flash_attention_2" and not _has_flash_attn():
         print("[warn] flash-attn missing, falling back to sdpa")
@@ -91,7 +91,14 @@ def load_model(cfg: ModelConfig):
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
 
-    model = Qwen3VLForConditionalGeneration.from_pretrained(cfg.model_id, **kwargs)
+    try:
+        model = Qwen3VLForConditionalGeneration.from_pretrained(
+            cfg.model_id, dtype=torch.bfloat16, **kwargs
+        )
+    except TypeError:  # transformers < 4.56 spells it torch_dtype
+        model = Qwen3VLForConditionalGeneration.from_pretrained(
+            cfg.model_id, torch_dtype=torch.bfloat16, **kwargs
+        )
     processor = AutoProcessor.from_pretrained(cfg.model_id)
     return model, processor
 

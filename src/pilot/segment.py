@@ -1,4 +1,4 @@
-﻿"""Turning ROI images into cell tables.
+"""Turning ROI images into cell tables.
 
 The topology descriptor needs one thing: where the nuclei are. This module
 produces that, with two routes:

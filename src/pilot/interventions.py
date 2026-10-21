@@ -1,4 +1,4 @@
-﻿"""Structural interventions and their exact effects.
+"""Structural interventions and their exact effects.
 
 The training signal this module exists for is simple:
 

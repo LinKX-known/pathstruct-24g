@@ -178,6 +178,8 @@ def topology_summary(points: np.ndarray, cell_radius: Optional[float] = None, co
     typ, gap = _scales(x)
     if not np.isfinite(typ) or typ <= 0:
         return {}
+    if float(np.max(x.max(axis=0) - x.min(axis=0))) <= 0:
+        return {}
     span = float(np.max(x.max(axis=0) - x.min(axis=0)))
     # a connectivity radius should never jump a large fraction of the field
     r_comp = float(comp_radius) if comp_radius is not None else min(1.5 * gap, 0.3 * span)

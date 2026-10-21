@@ -38,6 +38,8 @@ def generate_answer(model, processor, example: Dict[str, Any], image_tokens: int
     import torch
     from PIL import Image
 
+    from .vision import fit_image
+
     messages = [
         {
             "role": "user",
@@ -49,11 +51,9 @@ def generate_answer(model, processor, example: Dict[str, Any], image_tokens: int
     ]
     text = processor.apply_chat_template(messages, tokenize=False, add_generation_prompt=True)
     with Image.open(example["image"]) as im:
-        image = im.convert("RGB")
+        image = fit_image(im.convert("RGB"), image_tokens)
         image.load()
-    inputs = processor(
-        text=[text], images=[image], return_tensors="pt", max_pixels=int(28 * 28 * image_tokens)
-    ).to(model.device)
+    inputs = processor(text=[text], images=[image], return_tensors="pt").to(model.device)
 
     with torch.no_grad():
         out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)

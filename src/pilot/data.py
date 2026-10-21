@@ -139,6 +139,8 @@ def build_cf_examples(
                     "changed": int(itv.effect.changed),
                     "delta": float(itv.effect.delta),
                     "kind": e.kind,
+                    "center": [float(e.center[0]), float(e.center[1])],
+                    "radius": float(e.radius),
                     "descriptor": desc,
                 }
             )

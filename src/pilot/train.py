@@ -45,18 +45,22 @@ def _messages(example: Dict[str, Any], with_answer: bool) -> List[Dict[str, Any]
     return msgs
 
 
-def build_batch(processor, example: Dict[str, Any], device, max_pixels: int) -> Optional[Dict[str, Any]]:
+def build_batch(processor, example: Dict[str, Any], device, image_tokens: int = 512) -> Optional[Dict[str, Any]]:
     """Processor outputs + labels with the prompt masked out.
 
-    The image is processed twice (full conversation and prompt-only) to find the
-    answer boundary. It costs ~2x preprocessing but avoids fragile string
-    matching on the chat template; for a pilot that is the right trade.
+    The image is resized before it reaches the processor (see ``vision.py``)
+    instead of passing ``max_pixels``, which not every processor version
+    accepts. The image is processed twice (full conversation and prompt-only) to
+    find the answer boundary: ~2x preprocessing, but no fragile string matching
+    on the chat template.
     """
     from PIL import Image
 
+    from .vision import fit_image
+
     try:
         with Image.open(example["image"]) as im:
-            image = im.convert("RGB")
+            image = fit_image(im.convert("RGB"), image_tokens)
             image.load()
     except Exception:
         return None
@@ -64,11 +68,13 @@ def build_batch(processor, example: Dict[str, Any], device, max_pixels: int) -> 
     full_text = processor.apply_chat_template(_messages(example, True), tokenize=False)
     prompt_text = processor.apply_chat_template(_messages(example, False), tokenize=False, add_generation_prompt=True)
 
-    full = processor(text=[full_text], images=[image], return_tensors="pt", max_pixels=max_pixels)
-    prompt = processor(text=[prompt_text], images=[image], return_tensors="pt", max_pixels=max_pixels)
+    full = processor(text=[full_text], images=[image], return_tensors="pt")
+    prompt = processor(text=[prompt_text], images=[image], return_tensors="pt")
 
     labels = full["input_ids"].clone()
     n_prompt = int(prompt["input_ids"].shape[1])
+    if n_prompt >= labels.shape[1]:
+        return None
     labels[:, :n_prompt] = -100
     if (labels != -100).sum() == 0:
         return None
@@ -79,13 +85,22 @@ def build_batch(processor, example: Dict[str, Any], device, max_pixels: int) -> 
 
 
 def collate_aux(example: Dict[str, Any]):
+    """Tensors for the two auxiliary heads.
+
+    The mask features carry the *actual* edit centre and radius, so the
+    counterfactual head knows where the intervention happened. Feeding a
+    constant here would leave the head unable to localise anything.
+    """
     import torch
 
     desc = torch.tensor([example["descriptor"]], dtype=torch.float32)
     changed = torch.tensor([float(example["changed"])], dtype=torch.float32)
+    center = example.get("center") or [0.5, 0.5]
+    radius = float(example.get("radius") or 0.2)
     kind = example.get("kind", "collapse")
     feats = torch.tensor(
-        [[0.5, 0.5, 0.2] + [1.0 if kind == k else 0.0 for k in ("collapse", "expand", "translate")]],
+        [[float(center[0]), float(center[1]), radius]
+         + [1.0 if kind == k else 0.0 for k in ("collapse", "expand", "translate")]],
         dtype=torch.float32,
     )
     return desc, changed, feats
@@ -117,21 +132,23 @@ def run(
     torch.manual_seed(cfg.seed)
     np.random.seed(cfg.seed)
 
+    # heads first: the optimiser and the scheduler must be built once, over the
+    # final parameter set. Creating the scheduler before the heads and then
+    # replacing the optimiser leaves the schedule attached to an unused object.
+    d_model = int(getattr(model.config, "hidden_size", 0) or model.config.text_config.hidden_size)
+    n_desc = len(cf[0]["descriptor"]) if cf else 0
+    heads = build_heads(d_model, max(n_desc, 1), hidden=1024).to(device) if (use_aux and cf) else None
+
     params = [p for p in model.parameters() if p.requires_grad]
-    opt = torch.optim.AdamW(params, lr=cfg.lr, betas=(0.9, 0.95), weight_decay=0.0)
+    if heads is not None:
+        params = params + list(heads.parameters())
     total_steps = cfg.steps
+    opt = torch.optim.AdamW(params, lr=cfg.lr, betas=(0.9, 0.95), weight_decay=0.0)
     sched = get_cosine_schedule_with_warmup(
         opt, int(cfg.warmup_ratio * total_steps), total_steps
     )
 
-    d_model = int(getattr(model.config, "hidden_size", 0) or model.config.text_config.hidden_size)
-    n_desc = len(cf[0]["descriptor"]) if cf else 0
-    heads = build_heads(d_model, max(n_desc, 1), hidden=1024).to(device) if (use_aux and cf) else None
-    if heads is not None:
-        opt = torch.optim.AdamW(params + list(heads.parameters()), lr=cfg.lr, betas=(0.9, 0.95))
-
     iid = image_token_id(model)
-    max_pixels = int(28 * 28 * image_tokens)
     rng = np.random.default_rng(cfg.seed)
     model.train()
 
@@ -148,7 +165,7 @@ def run(
             if not pool:
                 pool = cf or growth
             ex = pool[int(rng.integers(0, len(pool)))]
-            batch = build_batch(processor, ex, device, max_pixels)
+            batch = build_batch(processor, ex, device, image_tokens)
             micro += 1
             if batch is None:
                 continue

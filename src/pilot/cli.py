@@ -58,14 +58,15 @@ def cmd_build(args) -> int:
     return 0
 
 
-def _load(preset: str):
+def _load(preset: str, lora: bool = True):
     from .model import attach_lora, load_model, prepare_for_training
 
     cfg = ModelConfig.from_preset(preset)
     model, processor = load_model(cfg)
-    model = attach_lora(model, cfg)
-    model = prepare_for_training(model, cfg)
-    model.print_trainable_parameters()
+    if lora:
+        model = attach_lora(model, cfg)
+        model = prepare_for_training(model, cfg)
+        model.print_trainable_parameters()
     return model, processor, cfg
 
 
@@ -73,7 +74,7 @@ def cmd_p0(args) -> int:
     data = read_jsonl(args.data)
     if args.limit:
         data = data[: args.limit]
-    model, processor, cfg = _load(args.preset)
+    model, processor, cfg = _load(args.preset, lora=False)
     choices = ["yes", "no"] if data and data[0].get("task") == "cf" else sorted({r["answer"] for r in data})
     rows = evaluate(model, processor, data, choices, limit=args.limit, image_tokens=cfg.image_tokens)
     s = score(rows)
@@ -89,8 +90,10 @@ def cmd_train(args) -> int:
     growth = read_jsonl(args.growth) if args.growth and Path(args.growth).exists() else []
     cf = read_jsonl(args.cf) if args.cf and Path(args.cf).exists() else []
     if not growth and not cf:
-        print("no data: run `pilot build` first")
+        print("no data: run `pilot build` first" )
         return 2
+    if not cf and not args.no_aux:
+        print("[warn] --cf is empty: training without the counterfactual head")
 
     model, processor, cfg = _load(args.preset)
     tcfg = TrainConfig(
@@ -116,9 +119,7 @@ def cmd_train(args) -> int:
 
 
 def cmd_eval(args) -> int:
-    from .model import image_token_id  # noqa: F401
-
-    model, processor, cfg = _load(args.preset)
+    model, processor, cfg = _load(args.preset, lora=False)
     if args.adapter:
         from peft import PeftModel
 
@@ -224,7 +225,8 @@ def build_parser() -> argparse.ArgumentParser:
     cl.add_argument("--suffix", default="_cells")
     cl.set_defaults(func=cmd_cells)
 
-    dc = sub.add_parser("doctor")    dc.add_argument("--manifest", required=True)
+    dc = sub.add_parser("doctor")
+    dc.add_argument("--manifest", required=True)
     dc.add_argument("--cells", required=True)
     dc.set_defaults(func=cmd_doctor)
 
@@ -294,3 +296,5 @@ def main(argv: Optional[List[str]] = None) -> int:
 
 if __name__ == "__main__":
     raise SystemExit(main())
+
+
