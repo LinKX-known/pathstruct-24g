@@ -1,0 +1,203 @@
+"""Pilot CLI for a 24 GB card.
+
+    pilot check                                  # what is installed, what fits
+    pilot synth  --out data/synth                # synthetic cohort, no real data
+    pilot build  --manifest m.csv --cells cells/ --out data/
+    pilot p0     --data data/cf.jsonl --limit 30 # zero-shot: is the task non-trivial?
+    pilot train  --growth data/growth.jsonl --cf data/cf.jsonl --steps 200
+    pilot eval   --data data/growth.jsonl --adapter out/pilot
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+from typing import List, Optional
+
+from .data import build_cf_examples, build_growth_examples, make_synthetic, read_jsonl, read_manifest, write_jsonl
+from .eval import evaluate, gate, paired_bootstrap, score
+from .model import PRESETS, ModelConfig
+
+
+def cmd_check(args) -> int:
+    info = {"presets": PRESETS}
+    for mod in ("torch", "transformers", "peft", "bitsandbytes", "qwen_vl_utils"):
+        try:
+            m = __import__(mod)
+            info[mod] = getattr(m, "__version__", "installed")
+        except ImportError:
+            info[mod] = None
+    try:
+        from .model import gpu_report
+
+        info["gpu"] = gpu_report()
+    except Exception as exc:  # noqa: BLE001
+        info["gpu"] = f"unavailable ({exc})"
+    info["ready"] = bool(info.get("torch") and info.get("transformers"))
+    print(json.dumps(info, indent=2, ensure_ascii=False))
+    return 0 if info["ready"] else 1
+
+
+def cmd_synth(args) -> int:
+    df = make_synthetic(args.out, per_class=args.per_class, size=args.size, seed=args.seed)
+    print(f"synthetic cohort: {len(df)} ROIs -> {args.out}")
+    return 0
+
+
+def cmd_build(args) -> int:
+    manifest = read_manifest(args.manifest)
+    growth = build_growth_examples(manifest)
+    cf = build_cf_examples(manifest, args.cells, per_roi=args.per_roi, seed=args.seed)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    write_jsonl(growth, out / "growth.jsonl")
+    write_jsonl(cf, out / "cf.jsonl")
+    rate = sum(r["changed"] for r in cf) / max(len(cf), 1)
+    print(f"growth: {len(growth)} | counterfactual: {len(cf)} | changed rate {rate:.3f}")
+    return 0
+
+
+def _load(preset: str):
+    from .model import attach_lora, load_model, prepare_for_training
+
+    cfg = ModelConfig.from_preset(preset)
+    model, processor = load_model(cfg)
+    model = attach_lora(model, cfg)
+    model = prepare_for_training(model, cfg)
+    model.print_trainable_parameters()
+    return model, processor, cfg
+
+
+def cmd_p0(args) -> int:
+    data = read_jsonl(args.data)
+    if args.limit:
+        data = data[: args.limit]
+    model, processor, cfg = _load(args.preset)
+    choices = ["yes", "no"] if data and data[0].get("task") == "cf" else sorted({r["answer"] for r in data})
+    rows = evaluate(model, processor, data, choices, limit=args.limit, image_tokens=cfg.image_tokens)
+    s = score(rows)
+    print(json.dumps({k: v for k, v in s.items() if k != "per_class"}, indent=2))
+    print("per class:", s.get("per_class"))
+    print("verdict:", gate(s, threshold=args.gate))
+    return 0
+
+
+def cmd_train(args) -> int:
+    from .train import TrainConfig, run
+
+    growth = read_jsonl(args.growth) if args.growth and Path(args.growth).exists() else []
+    cf = read_jsonl(args.cf) if args.cf and Path(args.cf).exists() else []
+    if not growth and not cf:
+        print("no data: run `pilot build` first")
+        return 2
+
+    model, processor, cfg = _load(args.preset)
+    tcfg = TrainConfig(
+        steps=args.steps,
+        grad_accum=args.grad_accum,
+        lr=args.lr,
+        lam_structure=args.lam_structure,
+        lam_cf=args.lam_cf,
+        save_dir=args.out,
+        log_every=args.log_every,
+    )
+    run(
+        model,
+        processor,
+        growth,
+        cf,
+        tcfg,
+        image_tokens=cfg.image_tokens,
+        use_aux=not args.no_aux,
+    )
+    print(f"saved adapter to {args.out}")
+    return 0
+
+
+def cmd_eval(args) -> int:
+    from .model import image_token_id  # noqa: F401
+
+    model, processor, cfg = _load(args.preset)
+    if args.adapter:
+        from peft import PeftModel
+
+        model = PeftModel.from_pretrained(model, args.adapter)
+
+    data = read_jsonl(args.data)
+    choices = ["yes", "no"] if data and data[0].get("task") == "cf" else sorted({r["answer"] for r in data})
+    rows = evaluate(model, processor, data, choices, limit=args.limit, image_tokens=cfg.image_tokens)
+    s = score(rows)
+    print(json.dumps({k: v for k, v in s.items() if k != "per_class"}, indent=2))
+    if args.out:
+        Path(args.out).write_text(json.dumps(rows, indent=2), encoding="utf-8")
+    if args.compare:
+        base = read_jsonl(args.compare)
+        key = lambda r: r["roi_id"] + "|" + r["gold"]
+        b = {key(r): r["correct"] for r in base}
+        pairs = [(r["correct"], b[key(r)]) for r in rows if key(r) in b]
+        if pairs:
+            print("paired:", paired_bootstrap([p[0] for p in pairs], [p[1] for p in pairs]))
+    print("verdict:", gate(s, threshold=args.gate))
+    return 0
+
+
+def build_parser() -> argparse.ArgumentParser:
+    p = argparse.ArgumentParser(prog="pilot", description=__doc__)
+    sub = p.add_subparsers(dest="cmd", required=True)
+
+    c = sub.add_parser("check")
+    c.set_defaults(func=cmd_check)
+
+    s = sub.add_parser("synth")
+    s.add_argument("--out", default="data/synth")
+    s.add_argument("--per-class", dest="per_class", type=int, default=12)
+    s.add_argument("--size", type=int, default=384)
+    s.add_argument("--seed", type=int, default=0)
+    s.set_defaults(func=cmd_synth)
+
+    b = sub.add_parser("build")
+    b.add_argument("--manifest", required=True)
+    b.add_argument("--cells", required=True)
+    b.add_argument("--out", required=True)
+    b.add_argument("--per-roi", dest="per_roi", type=int, default=6)
+    b.add_argument("--seed", type=int, default=0)
+    b.set_defaults(func=cmd_build)
+
+    for name, fn in (("p0", cmd_p0), ("train", cmd_train), ("eval", cmd_eval)):
+        sp = sub.add_parser(name)
+        sp.add_argument("--preset", default="4b_bf16", choices=sorted(PRESETS))
+        sp.add_argument("--limit", type=int, default=None)
+        sp.add_argument("--gate", type=float, default=0.65)
+        sp.set_defaults(func=fn)
+
+    p0 = sub.choices["p0"]
+    p0.add_argument("--data", required=True)
+
+    tr = sub.choices["train"]
+    tr.add_argument("--growth", default=None)
+    tr.add_argument("--cf", default=None)
+    tr.add_argument("--steps", type=int, default=200)
+    tr.add_argument("--grad-accum", dest="grad_accum", type=int, default=8)
+    tr.add_argument("--lr", type=float, default=1e-4)
+    tr.add_argument("--lam-structure", dest="lam_structure", type=float, default=0.5)
+    tr.add_argument("--lam-cf", dest="lam_cf", type=float, default=0.5)
+    tr.add_argument("--no-aux", dest="no_aux", action="store_true")
+    tr.add_argument("--out", default="out/pilot")
+    tr.add_argument("--log-every", dest="log_every", type=int, default=10)
+
+    ev = sub.choices["eval"]
+    ev.add_argument("--data", required=True)
+    ev.add_argument("--adapter", default=None)
+    ev.add_argument("--out", default=None)
+    ev.add_argument("--compare", default=None)
+    return p
+
+
+def main(argv: Optional[List[str]] = None) -> int:
+    args = build_parser().parse_args(argv)
+    return args.func(args)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
