@@ -76,16 +76,19 @@ touching nuclei; it is here so the pipeline runs anywhere.
 
 **2. CellViT++ / HoVer-Net / StarDist (use for anything you report)**
 
-Run your segmenter, export an **instance mask** (one integer per nucleus, 0 = background,
-single channel), then:
+Run their inference first (CellViT++ writes `{name}_cells.json` with a `centroid`
+and a `class` per nucleus), then convert:
 
 ```bash
-pilot segment --images masks/ --out cells/ --backend mask --pattern "*.png"
+pilot cells --json-dir cellvit_out --out data/real/cells
 ```
 
-This keeps the repo agnostic about the segmenter: swap CellViT++ for HoVer-Net and
-nothing downstream changes. Whatever you pick, state it in the paper — the cell table
-is now an input to your result, not a given.
+That is a real bridge, not a stub: the parser tolerates the surrounding schema and
+only requires the centroid and class, so a HoVer-Net export shaped the same way also
+works. If your segmenter writes instance masks instead, use `pilot segment --backend mask`.
+
+Whatever you pick, state it in the paper — the cell table is now an input to your
+result, not a given.
 
 ## One command
 
@@ -201,6 +204,21 @@ this repo:
 What was **not** taken: their persistence implementation. Theirs is a union-find over
 a 2D image sublevel set; ours is H0 from an MST plus raster lumen counting, so there
 is no shared code and no GPL dependency.
+
+One more lesson from their training script: their loss weights are `1.0` for a binary
+critical-point term but **`0.01`** for the persistence regression. When components have
+different scales, the nominal weight says almost nothing — always log each component
+separately and check its magnitude. That is why `train.py` prints `lm / struct / cf`
+independently instead of one total.
+
+## What reading other repos changed
+
+| repo | what was taken |
+|---|---|
+| TopoSlide | pad before topology; guard tiny maps; resumable long runs |
+| CellViT++ | its export is `{name}_cells.json` with `centroid` + `class` → added `pilot cells` to convert it directly |
+| CPathOGen | grouped bootstrap (resample patients, not ROIs) and Benjamini–Hochberg → added `groups=` to `paired_bootstrap` and `benjamini_hochberg()` |
+| ASPECT / PathBind | no public repository found; only their reported numbers and the PathoVernier dataset are available |
 
 ## Honest notes
 

@@ -135,9 +135,16 @@ def cmd_eval(args) -> int:
         base = read_jsonl(args.compare)
         key = lambda r: r["roi_id"] + "|" + r["gold"]
         b = {key(r): r["correct"] for r in base}
-        pairs = [(r["correct"], b[key(r)]) for r in rows if key(r) in b]
+        pairs = [(r, b[key(r)]) for r in rows if key(r) in b]
         if pairs:
-            print("paired:", paired_bootstrap([p[0] for p in pairs], [p[1] for p in pairs]))
+            print(
+                "paired:",
+                paired_bootstrap(
+                    [p[0]["correct"] for p in pairs],
+                    [p[1] for p in pairs],
+                    groups=[p[0].get("patient_id") or p[0]["roi_id"] for p in pairs],
+                ),
+            )
     print("verdict:", gate(s, threshold=args.gate))
     return 0
 
@@ -150,6 +157,23 @@ def cmd_segment(args) -> int:
         print(
             f"segmented {len(df)} images | "
             f"cells: median {df['n_cells'].median():.0f}, min {df['n_cells'].min()}, max {df['n_cells'].max()}"
+        )
+        bad = df[df["error"] != ""]
+        if len(bad):
+            print(f"{len(bad)} failed, e.g.:")
+            print(bad.head(3).to_string(index=False))
+    print(f"cells written to {args.out}")
+    return 0
+
+
+def cmd_cells(args) -> int:
+    from .cells import cells_from_cellvit_dir
+
+    df = cells_from_cellvit_dir(args.json_dir, args.out, suffix=args.suffix)
+    if len(df):
+        print(
+            f"converted {len(df)} CellViT exports | cells median {df['n_cells'].median():.0f}, "
+            f"min {df['n_cells'].min()}, max {df['n_cells'].max()}"
         )
         bad = df[df["error"] != ""]
         if len(bad):
@@ -194,8 +218,13 @@ def build_parser() -> argparse.ArgumentParser:
     c = sub.add_parser("check")
     c.set_defaults(func=cmd_check)
 
-    dc = sub.add_parser("doctor")
-    dc.add_argument("--manifest", required=True)
+    cl = sub.add_parser("cells")
+    cl.add_argument("--json-dir", dest="json_dir", required=True)
+    cl.add_argument("--out", required=True)
+    cl.add_argument("--suffix", default="_cells")
+    cl.set_defaults(func=cmd_cells)
+
+    dc = sub.add_parser("doctor")    dc.add_argument("--manifest", required=True)
     dc.add_argument("--cells", required=True)
     dc.set_defaults(func=cmd_doctor)
 

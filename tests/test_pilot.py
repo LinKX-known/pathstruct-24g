@@ -103,7 +103,6 @@ class TestEvalHelpers(unittest.TestCase):
         self.assertEqual(parse("acinar", ["acinar", "solid"]), "acinar")
         self.assertEqual(parse("The answer is Solid.", ["acinar", "solid"]), "solid")
         self.assertIsNone(parse("no idea", ["yes", "no"]))
-
     def test_normalise(self):
         self.assertEqual(normalise("  Yes. "), "yes")
 
@@ -123,3 +122,45 @@ class TestEvalHelpers(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+class TestCellVitBridge(unittest.TestCase):
+    def test_parse_cellvit_json(self):
+        import json as _json
+
+        from pilot.cells import cells_from_cellvit_dir, cells_from_cellvit_json
+
+        root = Path(__file__).resolve().parent / "_tmp_cellvit"
+        shutil.rmtree(root, ignore_errors=True)
+        root.mkdir(parents=True)
+        try:
+            payload = {
+                "type_map": {"0": "Tumor", "1": "Stroma"},
+                "cells": [
+                    {"centroid": [10.5, 20.5], "class": "Tumor"},
+                    {"centroid": [30.0, 40.0], "class": "Stroma"},
+                    {"centroid": [5.0, 5.0], "class": "Tumor"},
+                ],
+            }
+            (root / "roi_1_cells.json").write_text(_json.dumps(payload), encoding="utf-8")
+            pts, types = cells_from_cellvit_json(root / "roi_1_cells.json")
+            self.assertEqual(len(pts), 3)
+            self.assertEqual(len(set(types.tolist())), 2)
+            df = cells_from_cellvit_dir(root, root / "cells")
+            self.assertEqual(int(df.iloc[0]["n_cells"]), 3)
+            self.assertTrue((root / "cells" / "roi_1.csv").exists())
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_grouped_bootstrap_and_bh(self):
+        from pilot.eval import benjamini_hochberg, paired_bootstrap
+
+        a = [1, 1, 0, 1, 0, 1]
+        b = [1, 0, 0, 0, 0, 1]
+        groups = ["p1", "p1", "p1", "p2", "p2", "p2"]
+        out = paired_bootstrap(a, b, n_boot=200, groups=groups)
+        self.assertAlmostEqual(out["delta"], 0.3333, places=3)
+        self.assertEqual(out["n_groups"], 2)
+        adj = benjamini_hochberg([0.01, 0.04, 0.03])
+        self.assertEqual(len(adj), 3)
+        self.assertTrue(all(x <= 1.0 for x in adj))
+        self.assertLess(adj[0], adj[1])

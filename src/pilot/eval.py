@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import re
 from typing import Any, Dict, List, Optional, Sequence
-
 import numpy as np
 
 _PUNCT = re.compile(r"[^a-z0-9 ]")
@@ -116,21 +115,59 @@ def score(rows: Sequence[Dict[str, Any]]) -> Dict[str, float]:
 
 
 def paired_bootstrap(
-    a_correct: Sequence[int], b_correct: Sequence[int], n_boot: int = 1000, seed: int = 0
+    a_correct: Sequence[int],
+    b_correct: Sequence[int],
+    n_boot: int = 1000,
+    seed: int = 0,
+    groups: Optional[Sequence[str]] = None,
 ) -> Dict[str, float]:
-    """Mean difference (a - b) with a 95% percentile interval."""
+    """Mean difference (a - b) with a 95% percentile interval.
+
+    Pass ``groups`` (patient or slide ids) to resample *clusters* instead of
+    items. ROIs from the same patient are correlated, and ignoring that is the
+    fastest way to manufacture a significant result. (Same idea as the grouped
+    bootstrap in CPathOGen's honesty statistics.)
+    """
     a = np.asarray(a_correct, dtype=float)
     b = np.asarray(b_correct, dtype=float)
     if len(a) != len(b) or len(a) == 0:
         return {"delta": float("nan"), "lo": float("nan"), "hi": float("nan")}
     rng = np.random.default_rng(seed)
-    idx = rng.integers(0, len(a), size=(n_boot, len(a)))
-    deltas = a[idx].mean(1) - b[idx].mean(1)
+    deltas = np.empty(n_boot)
+    if groups is None:
+        idx = rng.integers(0, len(a), size=(n_boot, len(a)))
+        deltas = a[idx].mean(1) - b[idx].mean(1)
+    else:
+        groups = np.asarray(groups)
+        if len(groups) != len(a):
+            raise ValueError("groups must align with the correctness arrays")
+        uniq = np.unique(groups)
+        members = {g: np.flatnonzero(groups == g) for g in uniq}
+        for i in range(n_boot):
+            pick = rng.choice(uniq, size=len(uniq), replace=True)
+            idx = np.concatenate([members[g] for g in pick])
+            deltas[i] = a[idx].mean() - b[idx].mean()
     return {
         "delta": float(a.mean() - b.mean()),
         "lo": float(np.quantile(deltas, 0.025)),
         "hi": float(np.quantile(deltas, 0.975)),
+        "n": int(len(a)),
+        "n_groups": int(len(np.unique(groups))) if groups is not None else int(len(a)),
     }
+
+
+def benjamini_hochberg(p_values: Sequence[float]) -> List[float]:
+    """FDR adjustment for the per-class / per-edit-kind comparisons."""
+    values = np.asarray(p_values, dtype=float)
+    adjusted = np.full(values.shape, np.nan)
+    finite = np.flatnonzero(np.isfinite(values))
+    if not len(finite):
+        return adjusted.tolist()
+    order = finite[np.argsort(values[finite])]
+    ranked = values[order] * len(order) / np.arange(1, len(order) + 1)
+    ranked = np.minimum.accumulate(ranked[::-1])[::-1]
+    adjusted[order] = np.clip(ranked, 0, 1)
+    return adjusted.tolist()
 
 
 def gate(score_dict: Dict[str, float], threshold: float = 0.65) -> str:
