@@ -159,12 +159,52 @@ def cmd_segment(args) -> int:
     return 0
 
 
+def cmd_doctor(args) -> int:
+    from .diagnostics import doctor
+
+    df = read_manifest(args.manifest)
+    out = doctor(df, args.cells)
+    print(json.dumps(out, indent=2, ensure_ascii=False))
+    if out["problems"]:
+        print("\nfix these before training:")
+        for p in out["problems"]:
+            print(f"  - {p}")
+    return 0 if out["ok"] else 1
+
+
+def cmd_viz(args) -> int:
+    from .cells import load_cells_dir
+    from .diagnostics import render_roi
+
+    roi_id = args.roi_id or Path(args.image).stem
+    item = load_cells_dir(args.cells, roi_id)
+    if item is None:
+        print(f"no cells for {roi_id} in {args.cells}")
+        return 2
+    pts, _ = item
+    info = render_roi(args.image, pts, args.out)
+    print(json.dumps(info, indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="pilot", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     c = sub.add_parser("check")
     c.set_defaults(func=cmd_check)
+
+    dc = sub.add_parser("doctor")
+    dc.add_argument("--manifest", required=True)
+    dc.add_argument("--cells", required=True)
+    dc.set_defaults(func=cmd_doctor)
+
+    vz = sub.add_parser("viz")
+    vz.add_argument("--image", required=True)
+    vz.add_argument("--cells", required=True)
+    vz.add_argument("--out", required=True)
+    vz.add_argument("--roi-id", dest="roi_id", default=None)
+    vz.set_defaults(func=cmd_viz)
 
     sg = sub.add_parser("segment")
     sg.add_argument("--images", required=True)

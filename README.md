@@ -87,6 +87,16 @@ This keeps the repo agnostic about the segmenter: swap CellViT++ for HoVer-Net a
 nothing downstream changes. Whatever you pick, state it in the paper — the cell table
 is now an input to your result, not a given.
 
+## One command
+
+```bash
+bash scripts/run_pilot.sh            # synthetic cohort: segment -> doctor -> build -> P1 -> P2
+DATA=real bash scripts/run_pilot.sh  # uses data/real/{manifest.csv,cells/}
+```
+
+It is idempotent (skips steps whose outputs exist; `FORCE=1` to redo), and it stops if
+`doctor` finds a problem.
+
 ## Run
 
 ```bash
@@ -154,6 +164,43 @@ so **under ¥15**. Do the data work on CPU, free.
 - **P1 flat**: the task is too hard for 4B at this resolution. Try `8b_4bit_768` before giving up.
 - **P0 already high**: the edits are too easy or too visible. Shrink `radius_frac` in
   `interventions.sample_edit`.
+
+## Look before you train
+
+Two commands exist because the most common failure is invisible in the loss:
+
+```bash
+pilot doctor --manifest data/real/manifest.csv --cells data/real/cells
+pilot viz --image data/real/images/roi_001.png --cells data/real/cells --out viz/roi_001.png
+```
+
+`doctor` checks that every image exists, every ROI has cells, the descriptors are
+finite and the classes are not 80% one label. `viz` writes a three-panel figure:
+cells over the image, the rasterised sheet with lumina in red, and the connected
+components. If the lumen is in the wrong place, the segmenter is wrong — no amount
+of training will fix it.
+
+## Three details borrowed from TopoSlide's preprocessing
+
+Reading their `preprocessing/cluster_topology/*` was worth it; three things changed
+this repo:
+
+1. **Pad before computing topology.** They pad the map and set the outside to
+   `±inf` so that structures touching the border are not mistaken for holes. Copying
+   that exposed a real bug here: a ring that filled the frame was cut into arcs by
+   the dilation clipping at the array edge, so its lumen leaked into the background
+   and `hole_count` was 0. The raster frame is now expanded by the cell radius before
+   mapping (see `raster_mask`).
+2. **Guard against tiny maps.** They skip clusters with fewer than 5 points; this
+   repo uses 8 for descriptors and 60 for intervention sampling, and reports how many
+   ROIs were dropped.
+3. **Make long runs resumable.** They write a `topo_done.txt` per slide. Here the
+   shell script skips any step whose output already exists, which matters when a
+   4090 is billed by the hour.
+
+What was **not** taken: their persistence implementation. Theirs is a union-find over
+a 2D image sublevel set; ours is H0 from an MST plus raster lumen counting, so there
+is no shared code and no GPL dependency.
 
 ## Honest notes
 

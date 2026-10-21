@@ -1,4 +1,4 @@
-﻿"""Structure descriptors: what is present, where, and how it is arranged.
+"""Structure descriptors: what is present, where, and how it is arranged.
 
 Two blocks, concatenated:
 
@@ -93,25 +93,63 @@ def raster_mask(
     resolution: int = RASTER_RES,
     cell_radius: Optional[float] = None,
 ) -> np.ndarray:
-    """Binary sheet of cells, each drawn as a disk of ~0.6 typical spacings."""
+    """Binary sheet of cells, each drawn as a disk.
+
+    The frame is expanded by the cell radius on every side *before* mapping, so
+    dilation never gets clipped at the border. Without this a ring that fills
+    the frame is cut into arcs, the lumen leaks into the background, and the
+    hole count silently drops to zero -- which is exactly what happened on the
+    synthetic ring until TopoSlide's padding trick was copied over.
+    """
     x = np.asarray(points, dtype=np.float64)
     if len(x) == 0:
         return np.zeros((resolution, resolution), dtype=bool)
     if cell_radius is None:
         cell_radius = 1.3 * _scales(x)[1]
-    lo = x.min(axis=0)
-    span = np.maximum(x.max(axis=0) - lo, 1e-9)
+    lo = x.min(axis=0) - cell_radius
+    hi = x.max(axis=0) + cell_radius
+    span = np.maximum(hi - lo, 1e-9)
     scale = (resolution - 3) / float(span.max())
+    r = max(1, int(round(cell_radius * scale)))
     xy = ((x - lo) * scale + 1.5).astype(int)
-    xy = np.clip(xy, 1, resolution - 2)
+    xy = np.clip(xy, r + 1, resolution - r - 2)
 
     mask = np.zeros((resolution, resolution), dtype=bool)
     mask[xy[:, 1], xy[:, 0]] = True
-    r = max(1, int(round(cell_radius * scale)))
     struct = np.zeros((2 * r + 1, 2 * r + 1), dtype=bool)
     yy, xx = np.ogrid[-r : r + 1, -r : r + 1]
     struct[yy**2 + xx**2 <= r**2 + 0.5] = True
     return ndimage.binary_dilation(mask, structure=struct)
+
+
+def hole_mask(
+    points: np.ndarray,
+    resolution: int = RASTER_RES,
+    cell_radius: Optional[float] = None,
+    close_px: int = 1,
+    pad: int = 2,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Boolean lumen mask, plus the cell sheet it came from.
+
+    Two details borrowed from TopoSlide's preprocessing:
+
+    * **pad** before filling, so a structure touching the image border is
+      connected to the outside instead of being counted as a lumen;
+    * **close** one pixel before filling, because a single-pixel channel between
+      two cells otherwise lets an obvious gland leak into the background. This
+      was reproduced on a synthetic ring at 0.8-1.0x the gap scale, where plain
+      filling reported zero lumina.
+    """
+    mask = raster_mask(points, resolution=resolution, cell_radius=cell_radius)
+    if not mask.any():
+        return np.zeros_like(mask), mask
+    padded = np.pad(mask, pad, mode="constant", constant_values=False)
+    if close_px > 0:
+        k = 2 * close_px + 1
+        padded = ndimage.binary_closing(padded, structure=np.ones((k, k), dtype=bool))
+    filled = ndimage.binary_fill_holes(padded)
+    holes = filled & ~padded
+    return holes[pad:-pad, pad:-pad], mask
 
 
 def hole_stats(
@@ -120,12 +158,10 @@ def hole_stats(
     min_area_frac: float = 0.0015,
     cell_radius: Optional[float] = None,
 ) -> Tuple[int, float]:
-    """Number and area fraction of holes in the cell sheet (lumina)."""
-    mask = raster_mask(points, resolution=resolution, cell_radius=cell_radius)
-    if not mask.any():
+    """Number and area fraction of lumina in the cell sheet."""
+    holes, mask = hole_mask(points, resolution=resolution, cell_radius=cell_radius)
+    if not holes.any():
         return 0, 0.0
-    filled = ndimage.binary_fill_holes(mask)
-    holes = filled & ~mask
     labels, n = ndimage.label(holes)
     if n == 0:
         return 0, 0.0
