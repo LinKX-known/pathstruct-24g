@@ -212,6 +212,33 @@ def cmd_viz(args) -> int:
     return 0
 
 
+def cmd_segbench(args) -> int:
+    from .segbench import benchmark, summarise
+
+    df = benchmark(
+        args.images,
+        args.masks,
+        pattern=args.pattern,
+        match_radius=args.match_radius,
+        limit=args.limit,
+    )
+    if df.empty:
+        print("no matched image/mask pairs; check the two directories")
+        return 2
+    s = summarise(df)
+    print(json.dumps(s, indent=2))
+    if args.out:
+        df.to_csv(args.out, index=False)
+        print(f"per-patch table: {args.out}")
+    if s["detection_f1"] < 0.6:
+        print("verdict: the segmenter is weak on this data; fix it before trusting topology")
+    elif s["hole_agreement"] < 0.8:
+        print("verdict: lumen counts disagree often; treat hole_count as a noisy target")
+    else:
+        print("verdict: segmentation is good enough for the topology target on this cohort")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="pilot", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
@@ -236,6 +263,15 @@ def build_parser() -> argparse.ArgumentParser:
     vz.add_argument("--out", required=True)
     vz.add_argument("--roi-id", dest="roi_id", default=None)
     vz.set_defaults(func=cmd_viz)
+
+    sb = sub.add_parser("segbench")
+    sb.add_argument("--images", required=True)
+    sb.add_argument("--masks", required=True)
+    sb.add_argument("--pattern", default="*.png")
+    sb.add_argument("--match-radius", dest="match_radius", type=float, default=8.0)
+    sb.add_argument("--limit", type=int, default=None)
+    sb.add_argument("--out", default=None)
+    sb.set_defaults(func=cmd_segbench)
 
     sg = sub.add_parser("segment")
     sg.add_argument("--images", required=True)

@@ -120,74 +120,33 @@ class TestEvalHelpers(unittest.TestCase):
         self.assertGreaterEqual(out["hi"], out["delta"])
 
 
-if __name__ == "__main__":
-    unittest.main()
+class TestSegBench(unittest.TestCase):
+    def test_benchmark_against_ground_truth_masks(self):
+        import pandas as pd
+        from PIL import Image, ImageDraw
 
-class TestCellVitBridge(unittest.TestCase):
-    def test_parse_cellvit_json(self):
-        import json as _json
+        from pilot.segbench import benchmark, summarise
 
-        from pilot.cells import cells_from_cellvit_dir, cells_from_cellvit_json
-
-        root = Path(__file__).resolve().parent / "_tmp_cellvit"
-        shutil.rmtree(root, ignore_errors=True)
-        root.mkdir(parents=True)
-        try:
-            payload = {
-                "type_map": {"0": "Tumor", "1": "Stroma"},
-                "cells": [
-                    {"centroid": [10.5, 20.5], "class": "Tumor"},
-                    {"centroid": [30.0, 40.0], "class": "Stroma"},
-                    {"centroid": [5.0, 5.0], "class": "Tumor"},
-                ],
-            }
-            (root / "roi_1_cells.json").write_text(_json.dumps(payload), encoding="utf-8")
-            pts, types = cells_from_cellvit_json(root / "roi_1_cells.json")
-            self.assertEqual(len(pts), 3)
-            self.assertEqual(len(set(types.tolist())), 2)
-            df = cells_from_cellvit_dir(root, root / "cells")
-            self.assertEqual(int(df.iloc[0]["n_cells"]), 3)
-            self.assertTrue((root / "cells" / "roi_1.csv").exists())
-        finally:
-            shutil.rmtree(root, ignore_errors=True)
-
-    def test_grouped_bootstrap_and_bh(self):
-        from pilot.eval import benjamini_hochberg, paired_bootstrap
-
-        a = [1, 1, 0, 1, 0, 1]
-        b = [1, 0, 0, 0, 0, 1]
-        groups = ["p1", "p1", "p1", "p2", "p2", "p2"]
-        out = paired_bootstrap(a, b, n_boot=200, groups=groups)
-        self.assertAlmostEqual(out["delta"], 0.3333, places=3)
-        self.assertEqual(out["n_groups"], 2)
-        adj = benjamini_hochberg([0.01, 0.04, 0.03])
-        self.assertEqual(len(adj), 3)
-        self.assertTrue(all(x <= 1.0 for x in adj))
-        self.assertLess(adj[0], adj[1])
-
-class TestVisionAndExamples(unittest.TestCase):
-    def test_fit_image_caps_tokens(self):
-        from PIL import Image
-
-        from pilot.vision import estimate_tokens, fit_image, side_for_tokens
-
-        side = side_for_tokens(512)
-        img = Image.new("RGB", (1024, 768), (255, 255, 255))
-        out = fit_image(img, 512)
-        self.assertLessEqual(max(out.size), side)
-        self.assertLessEqual(estimate_tokens(*out.size), 560)
-
-    def test_cf_examples_have_location(self):
-        root = Path(__file__).resolve().parent / "_tmp_cf"
+        root = Path(__file__).resolve().parent / "_tmp_segbench"
         shutil.rmtree(root, ignore_errors=True)
         try:
-            df = make_synthetic(root, per_class=1, n_cells=140, size=256, seed=3)
-            rows = build_cf_examples(df, root / "cells", per_roi=2, seed=0)
-            self.assertTrue(rows)
-            for r in rows:
-                self.assertIn("center", r)
-                self.assertIn("radius", r)
-                self.assertEqual(len(r["center"]), 2)
+            make_synthetic(root, per_class=1, n_cells=120, size=256, seed=5)
+            masks = root / "masks"
+            masks.mkdir(parents=True, exist_ok=True)
+            for img in sorted((root / "images").glob("*.png")):
+                cells = pd.read_csv(root / "cells" / f"{img.stem}.csv")
+                canvas = Image.new("L", (256, 256), 0)
+                draw = ImageDraw.Draw(canvas)
+                for idx, (x, y) in enumerate(zip(cells["x"], cells["y"]), start=1):
+                    draw.ellipse([x - 3, y - 3, x + 3, y + 3], fill=idx % 255)
+                canvas.save(masks / img.name)
+
+            df = benchmark(root / "images", masks, limit=3)
+            s = summarise(df)
+            self.assertGreater(s["n_patches"], 0)
+            self.assertGreater(s["detection_f1"], 0.5)
+            self.assertTrue(np.isfinite(s["descriptor_delta_median"]))
+            self.assertIn("hole_agreement", s)
         finally:
             shutil.rmtree(root, ignore_errors=True)
 

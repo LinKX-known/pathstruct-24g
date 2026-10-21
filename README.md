@@ -100,6 +100,35 @@ DATA=real bash scripts/run_pilot.sh  # uses data/real/{manifest.csv,cells/}
 It is idempotent (skips steps whose outputs exist; `FORCE=1` to redo), and it stops if
 `doctor` finds a problem.
 
+## Benchmarking the segmenter on PanNuke / MoNuSeg
+
+Both datasets ship instance masks, so before training any VLM you can measure how
+much of the topology target is real and how much is segmentation noise:
+
+`ash
+pilot segbench --images pannuke/images/fold1 --masks pannuke/masks/fold1 --out pannuke_segbench.csv
+`
+
+It reports detection F1 and centroid error, plus the two numbers that actually
+matter here:
+
+| column | why it matters |
+|---|---|
+| descriptor_delta_median | how far the arrangement descriptor moves when ground-truth nuclei are replaced by predicted ones |
+| hole_agreement | how often the lumen count agrees; below ~0.8 the target is noisy |
+
+Read the verdict line: a weak segmenter invalidates the supervision, not just the
+reported segmentation score.
+
+Two honest caveats about using these sets for *training* a segmenter:
+
+- **Do not retrain a segmenter from scratch.** CellViT++ is already PanNuke-trained;
+  a home-made U-Net would be worse and cost GPU hours you could spend on the VLM.
+- **PanNuke patches are 256x256.** That is fine for detection and cell typing, but a
+  lumen needs a larger field of view — most 256x256 patches contain no ring at all,
+  so PanNuke cannot validate the hole feature. MoNuSeg's 1000x1000 fields are the
+  right scale for that, and its multi-organ content doubles as a domain check.
+
 ## Run
 
 ```bash
