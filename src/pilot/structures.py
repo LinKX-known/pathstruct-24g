@@ -142,7 +142,9 @@ def topology_summary(points: np.ndarray, cell_radius: Optional[float] = None, co
     typ, gap = _scales(x)
     if not np.isfinite(typ) or typ <= 0:
         return {}
-    r_comp = float(comp_radius) if comp_radius is not None else 1.5 * gap
+    span = float(np.max(x.max(axis=0) - x.min(axis=0)))
+    # a connectivity radius should never jump a large fraction of the field
+    r_comp = float(comp_radius) if comp_radius is not None else min(1.5 * gap, 0.3 * span)
     r_cell = float(cell_radius) if cell_radius is not None else 1.3 * gap
     n_comp = float(component_count(x, r_comp))
     n_holes, hole_frac = hole_stats(x, cell_radius=r_cell)
@@ -286,6 +288,7 @@ def gudhi_dtm_summary(points: np.ndarray, k: int = 16) -> Dict[str, float]:
         "dtm_h1_sum": float(h1.sum()) if len(h1) else 0.0,
         "dtm_h1_count": float(len(h1)),
     }
+
 
 
 

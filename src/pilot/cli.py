@@ -142,12 +142,36 @@ def cmd_eval(args) -> int:
     return 0
 
 
+def cmd_segment(args) -> int:
+    from .segment import segment_dir
+
+    df = segment_dir(args.images, args.out, backend=args.backend, pattern=args.pattern)
+    if len(df):
+        print(
+            f"segmented {len(df)} images | "
+            f"cells: median {df['n_cells'].median():.0f}, min {df['n_cells'].min()}, max {df['n_cells'].max()}"
+        )
+        bad = df[df["error"] != ""]
+        if len(bad):
+            print(f"{len(bad)} failed, e.g.:")
+            print(bad.head(3).to_string(index=False))
+    print(f"cells written to {args.out}")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="pilot", description=__doc__)
     sub = p.add_subparsers(dest="cmd", required=True)
 
     c = sub.add_parser("check")
     c.set_defaults(func=cmd_check)
+
+    sg = sub.add_parser("segment")
+    sg.add_argument("--images", required=True)
+    sg.add_argument("--out", required=True)
+    sg.add_argument("--backend", default="classical", choices=("classical", "mask"))
+    sg.add_argument("--pattern", default="*.png")
+    sg.set_defaults(func=cmd_segment)
 
     s = sub.add_parser("synth")
     s.add_argument("--out", default="data/synth")

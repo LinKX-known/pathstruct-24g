@@ -52,6 +52,41 @@ pilot check                     # prints versions + GPU + the three presets
 
 Start with `4b_bf16`. It has no quantisation bugs, so any failure is your code.
 
+## Segmentation: pixels to cells
+
+The topology descriptor only needs coordinates, so the first step is turning an ROI
+image into a cell table:
+
+```
+ROI png ──► segmentation ──► cells/{roi_id}.csv (x, y, type) ──► topology
+```
+
+Two routes, and you should use both at some point:
+
+**1. Bundled, weight-free (start here)**
+
+```bash
+pilot segment --images data/synth/images --out data/synth/cells --backend classical
+```
+
+Haematoxylin channel → Otsu → distance transform → watershed. No weights, no GPU.
+On the synthetic cohort it recovers the arrangement exactly: ring → 1 lumen, solid →
+0 lumens, multifocal → 3 connected components. On real H&E it will under-segment
+touching nuclei; it is here so the pipeline runs anywhere.
+
+**2. CellViT++ / HoVer-Net / StarDist (use for anything you report)**
+
+Run your segmenter, export an **instance mask** (one integer per nucleus, 0 = background,
+single channel), then:
+
+```bash
+pilot segment --images masks/ --out cells/ --backend mask --pattern "*.png"
+```
+
+This keeps the repo agnostic about the segmenter: swap CellViT++ for HoVer-Net and
+nothing downstream changes. Whatever you pick, state it in the paper — the cell table
+is now an input to your result, not a given.
+
 ## Run
 
 ```bash
@@ -130,6 +165,9 @@ so **under ¥15**. Do the data work on CPU, free.
   the auxiliary regression target does not vary within a ROI.
 - The synthetic cohort uses ring/solid/multifocal shapes. Good for plumbing, useless for
   pathology claims.
+- The bundled classical segmenter is a fallback. It is enough to prove the chain
+  pixels → cells → topology works, but every number you intend to publish should come
+  from CellViT++ or HoVer-Net masks.
 
 ## License
 

@@ -26,10 +26,16 @@ class TestSyntheticPipeline(unittest.TestCase):
         shutil.rmtree(cls.root, ignore_errors=True)
         cls.root.mkdir(parents=True, exist_ok=True)
         cls.manifest = make_synthetic(cls.root / "data", per_class=3, n_cells=140, size=128, seed=0)
+        # a larger cohort for the pixel -> cell -> topology test: at 128 px the
+        # synthetic dots overlap too much for the classical segmenter to be stable
+        cls.seg_root = Path(__file__).resolve().parent / "_tmp_seg"
+        shutil.rmtree(cls.seg_root, ignore_errors=True)
+        make_synthetic(cls.seg_root, per_class=1, n_cells=200, size=256, seed=7)
 
     @classmethod
     def tearDownClass(cls):
         shutil.rmtree(cls.root, ignore_errors=True)
+        shutil.rmtree(cls.seg_root, ignore_errors=True)
 
     def test_manifest_and_images(self):
         df = read_manifest(self.root / "data" / "manifest.csv")
@@ -67,6 +73,20 @@ class TestSyntheticPipeline(unittest.TestCase):
         solid = topology_summary(self._points("solid"))
         self.assertEqual(ring["hole_count"], 1.0)
         self.assertEqual(solid["hole_count"], 0.0)
+
+    def test_classical_segmentation_recovers_arrangement(self):
+        try:
+            from pilot.segment import segment_image
+        except ImportError:
+            self.skipTest("scikit-image not installed")
+        images = self.seg_root / "images"
+        ring_pts, _ = segment_image(images / "ring_000.png")
+        solid_pts, _ = segment_image(images / "solid_000.png")
+        multi_pts, _ = segment_image(images / "multifocal_000.png")
+        self.assertGreater(len(ring_pts), 20)
+        self.assertEqual(topology_summary(ring_pts)["hole_count"], 1.0)
+        self.assertEqual(topology_summary(solid_pts)["hole_count"], 0.0)
+        self.assertEqual(topology_summary(multi_pts)["n_comp"], 3.0)
 
     def _points(self, kind):
         rng = np.random.default_rng(0)
