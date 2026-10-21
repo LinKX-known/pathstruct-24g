@@ -263,7 +263,7 @@ Held-out（60 cf；14 患者；final 150 步）：
 - 头评估：`scripts/eval_heads.py`、`scripts/bootstrap_heads.py`
 - 对照：`scripts/make_blank_control.py`、`scripts/balance_cf.py`
 - 测试：`python -m pytest tests/` → **23 passed**
-- 代码改动未 commit/push；原始预测/头结果在 `out/heads_*`、`out/pred_*`
+- 代码与报告已提交并推送到 `feasibility/pilot-fixes` 分支（commit `2715637`、`561b418`、`89e8a25`）；原始预测/头结果在 `out/heads_*`、`out/pred_*`
 
 ### 复现命令（真实数据）
 
@@ -421,7 +421,7 @@ python scripts/bootstrap_heads.py --real out/heads_real_s0.json \
 | `scripts/make_blank_control.py` | 生成 blank-box 对照（box / before_after） |
 | `scripts/probe_structure.py` | 线性结构探针（aux vs no-aux backbone） |
 
-> 注：`data/`、`out/` 被 `.gitignore` 忽略；模型/Qwen 缓存在 `/root/.cache/huggingface`。所有代码改动**未 commit/push**。
+> 注：`data/`、`out/` 被 `.gitignore` 忽略；模型/Qwen 缓存在 `/root/.cache/huggingface`。代码与报告已提交并推送到 `feasibility/pilot-fixes` 分支（commit `2715637`、`561b418`、`89e8a25`）。
 
 ---
 
