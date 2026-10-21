@@ -7,6 +7,28 @@ which stays the full method. Here we only ask one question:
 > On a single RTX 4090 (24 GB), does training a model to judge **structural changes**
 > move the needle, or is the idea dead?
 
+**Feasibility run (2026-10-21):** the easy LM task is learnable (0.523 → 0.674
+on held-out patients; text-only and box-only controls both 0.500), **but the
+0.674 is largely a shortcut**: 14% of validation boxes are empty and trivially
+"no". On a strict non-empty, kind/label-balanced rebuild, the **LM** is 0.500
+at 384 px and 0.534 at 1024 px (CI [0.481, 0.582]). The **trained auxiliary
+heads** do better: the structure head reaches topology R² 0.315/0.411
+(blank controls negative), and the counterfactual head reaches **0.640** on
+strict 384 (blank 0.509) and 0.686 on strict 1024 (blank AUC 0.728, so the
+latter is mostly box geometry). The module-level idea is partially validated;
+the LM readout and P2 transfer are not. P2 is inconclusive because the
+synthetic downstream task saturates.
+
+**Real H&E follow-up:** MoNuSeg (37 train / 14 test patients, expert nucleus
+masks): the trained counterfactual head averages **0.611** over 3 seeds
+(0.583/0.600/0.650), blank-box 0.500, box-geometry 0.467; the **expand** edit is
+stable at 0.722, translate ~0.56. The structure head does **not** generalise on
+this 37-image cohort (topology R² negative). PanNuke (405 train patches, 5 cell
+types, 4 completely held-out tissues): cf head **0.588** over 2 seeds
+(0.595/0.582), blank 0.530, box-geometry 0.577, but the head is underfit
+(1.3 epochs) and the structure head again has negative topology R². Full
+numbers, controls and next steps: [`FEASIBILITY.md`](FEASIBILITY.md).
+
 ## What the pilot can and cannot tell you
 
 | | |
@@ -21,26 +43,51 @@ which stays the full method. Here we only ask one question:
 Treat a 24 GB result as a **lower bound**: if it works at 512 image tokens, it will very
 likely work better at 1024; if it fails, the resolution may simply be too low.
 
+The feasibility run is a concrete example of that failure mode: the easy
+counterfactual task is learnable, but the strict non-empty version is 0.500 at
+384 px (144 visual tokens) and only 0.534 at 1024 px (1024 tokens,
+ground-truth cells). See the resolution check in
+[`FEASIBILITY.md`](FEASIBILITY.md) before interpreting a P1 result.
+
 ## Three pilots, three gates
 
 | step | what | time on 4090 | pass if |
 |---|---|---|---|
-| **P0** | zero-shot the counterfactual task | 10 min | accuracy ≈ 0.5–0.65 (near chance → the task is non-trivial) |
-| **P1** | train on the counterfactual task only | 1–2 h | balanced accuracy climbs above **0.65** |
-| **P2** | growth pattern + aux vs LoRA-only | 2–3 h | downstream accuracy **+2 points** over LoRA-only |
+| **P0** | zero-shot the counterfactual task on held-out patients | 10 min | balanced accuracy ≈ 0.5–0.65 (near chance → the task is non-trivial) |
+| **P1** | train on the counterfactual task only, evaluate held-out patients | 1–2 h | balanced accuracy climbs above **0.65** |
+| **P2** | growth + aux vs the same data mix without aux, held-out patients | 2–3 h | downstream accuracy **+2 points** over the baseline |
 
 P0 above 0.8 means the task is too easy — shrink the edit radius before training.
 P1 stuck at 0.5 means the model cannot learn it from this much data — add data or simplify edits.
-P2 flat means the auxiliary signal does not transfer — check `λ` and whether gradients reach the backbone.
+The feasibility run found one more failure mode: a P1 pass can come from
+**empty boxes** (always "no"). Rebuild with `--min-affected 5` and report the
+non-empty subset; the 384 px strict control was at chance. See
+[`FEASIBILITY.md`](FEASIBILITY.md).
+P2 flat means the auxiliary signal does not transfer — but first check that the
+baseline is not already at 1.000 (a ceiling makes P2 uninformative), then check
+`λ` and whether gradients reach the backbone. The feasibility run hit exactly
+that ceiling on synthetic data.
+
+`pilot build` writes `*_train.jsonl` / `*_val.jsonl`, split by **patient**, and
+the script evaluates only on `*_val.jsonl`. Evaluating on the training ROIs
+would make P1 a memorisation check and P2 a ceiling comparison.
+
+The `--no-aux` arm still sees the counterfactual examples through the language
+loss; it differs from the aux arm only in the auxiliary heads/losses. That is
+the right ablation for "does the auxiliary loss help", but it is not a
+growth-only LoRA baseline. Say which baseline you mean in the paper.
 
 ## Install
 
 ```bash
-pip install -e ".[qwen]"        # torch, transformers>=4.57, peft, bitsandbytes
+pip install -e ".[qwen]"        # torch, transformers>=4.57,<5, peft, bitsandbytes
 pilot check                     # prints versions + GPU + the three presets
 ```
 
 `pilot check` must print `"ready": true` and a GPU line before anything else.
+`scikit-image` is a base dependency now; without it `pilot segment` fails.
+Transformers 5.x requires torch>=2.6, so the extra pins `<5` — the pilot is
+validated on 4.57.6 with torch 2.5.1.
 
 ## Presets for 24 GB
 
@@ -49,8 +96,12 @@ pilot check                     # prints versions + GPU + the three presets
 | `4b_bf16` | Qwen3-VL-4B | none | 512 | ✅ comfortable (~16 GB) |
 | `8b_4bit` | Qwen3-VL-8B | 4-bit | 512 | ✅ (~14 GB) |
 | `8b_4bit_768` | Qwen3-VL-8B | 4-bit | 768 | ⚠️ tight, try it |
+| `4b_bf16_1024` | Qwen3-VL-4B | none | 1024 | ✅ (~11 GB measured) |
 
 Start with `4b_bf16`. It has no quantisation bugs, so any failure is your code.
+`4b_bf16_1024` is the high-resolution check for small objects: at 384 px a
+32 px visual token covers several synthetic cells, so the local structure the
+counterfactual task asks about is not resolvable.
 
 ## Segmentation: pixels to cells
 
@@ -61,18 +112,32 @@ image into a cell table:
 ROI png ──► segmentation ──► cells/{roi_id}.csv (x, y, type) ──► topology
 ```
 
+`pilot synth` writes the *ground-truth* tables to `data/synth/cells`. Always
+segment into a different directory (`data/synth/cells_seg` in the script).
+Writing into `cells/` made failures invisible: the old table stayed behind and
+`doctor` saw a complete cohort. `segment_dir` now deletes the target file before
+segmenting, so a failure leaves a hole that `doctor` reports.
+
 Two routes, and you should use both at some point:
 
 **1. Bundled, weight-free (start here)**
 
 ```bash
-pilot segment --images data/synth/images --out data/synth/cells --backend classical
+pilot segment --images data/synth/images --out data/synth/cells_seg --backend classical
 ```
 
 Haematoxylin channel → Otsu → distance transform → watershed. No weights, no GPU.
-On the synthetic cohort it recovers the arrangement exactly: ring → 1 lumen, solid →
-0 lumens, multifocal → 3 connected components. On real H&E it will under-segment
-touching nuclei; it is here so the pipeline runs anywhere.
+On a 72-ROI synthetic cohort it produces a cell table for all 72 ROIs (the
+24/class cohort is what the feasibility run used; the default script still
+makes 12/class). Ring → 1 lumen, solid → 0 lumens, multifocal → 3 connected
+components in the unit test. It merges touching nuclei (median 136 of 220
+cells) and assigns one type; on real H&E it will under-segment further. It is
+here so the pipeline runs anywhere.
+
+Otsu needed a guard: it returns a histogram bin *centre*, and when the background
+is a single near-zero value the centre can fall just below it. `>` then marks the
+whole image as foreground. Four of the first 36 synthetic ROIs failed that way;
+the guard splits halfway between the background and the upper tail instead.
 
 **2. CellViT++ / HoVer-Net / StarDist (use for anything you report)**
 
@@ -93,36 +158,52 @@ result, not a given.
 ## One command
 
 ```bash
-bash scripts/run_pilot.sh            # synthetic cohort: segment -> doctor -> build -> P1 -> P2
+bash scripts/run_pilot.sh            # synthetic: segment -> doctor -> build -> P0 -> P1 -> P2
 DATA=real bash scripts/run_pilot.sh  # uses data/real/{manifest.csv,cells/}
 ```
 
 It is idempotent (skips steps whose outputs exist; `FORCE=1` to redo), and it stops if
-`doctor` finds a problem.
+`doctor` finds a problem. `PER_CLASS=24 VAL_FRAC=0.3` gives the 72-ROI cohort used
+in the feasibility run.
 
 ## Run
 
 ```bash
 # 0. synthetic cohort: proves the pipeline without any real data
-pilot synth --out data/synth --per-class 12
-pilot build --manifest data/synth/manifest.csv --cells data/synth/cells --out data/synth --per-roi 4
+pilot synth --out data/synth --per-class 24
+pilot segment --images data/synth/images --out data/synth/cells_seg --backend classical
+pilot build --manifest data/synth/manifest.csv --cells data/synth/cells_seg \
+  --out data/synth --per-roi 6 --val-frac 0.3
+# optional, recommended for a structural benchmark: add --min-affected 5
+# (empty boxes are always "no" and are a free shortcut; see FEASIBILITY.md)
 
-# 1. P0 — zero shot
-pilot p0 --data data/synth/cf.jsonl --limit 24 --preset 4b_bf16
+# 1. P0 — zero shot on held-out patients
+pilot p0 --data data/synth/cf_val.jsonl --preset 4b_bf16
 
-# 2. P1 — learn the counterfactual task
-pilot train --cf data/synth/cf.jsonl --steps 150 --preset 4b_bf16 --out out/p1
-pilot eval  --data data/synth/cf.jsonl --adapter out/p1 --preset 4b_bf16
+# 2. P1 — learn the counterfactual task, evaluate held-out patients
+pilot train --cf data/synth/cf_train.jsonl --steps 150 --preset 4b_bf16 --out out/p1
+pilot eval  --data data/synth/cf_val.jsonl --adapter out/p1 --preset 4b_bf16
 
-# 3. P2 — downstream + aux vs LoRA-only (same data, same steps, only the loss differs)
-pilot train --growth data/synth/growth.jsonl --cf data/synth/cf.jsonl --steps 300 --preset 4b_bf16 --out out/p2_aux
-pilot train --growth data/synth/growth.jsonl --cf data/synth/cf.jsonl --steps 300 --preset 4b_bf16 --out out/p2_lora --no-aux
-pilot eval  --data data/synth/growth.jsonl --adapter out/p2_aux  --out pred_aux.json
-pilot eval  --data data/synth/growth.jsonl --adapter out/p2_lora --out pred_lora.json --compare pred_aux.json
+# 3. P2 — aux vs the same data mix without aux (same steps, only the loss differs)
+pilot train --growth data/synth/growth_train.jsonl --cf data/synth/cf_train.jsonl \
+  --steps 300 --preset 4b_bf16 --out out/p2_aux
+pilot train --growth data/synth/growth_train.jsonl --cf data/synth/cf_train.jsonl \
+  --steps 300 --preset 4b_bf16 --out out/p2_lora --no-aux
+pilot eval  --data data/synth/growth_val.jsonl --adapter out/p2_aux  --out pred_aux.json
+pilot eval  --data data/synth/growth_val.jsonl --adapter out/p2_lora --out pred_lora.json --compare pred_aux.json
 ```
 
-The synthetic cohort has only 12 ROIs — it validates plumbing, not learning. Replace it with
-real data as soon as the commands run end to end:
+`pilot build` also writes the unsplit `growth.jsonl` / `cf.jsonl`; use those only
+for debugging. The split files are the ones the gates refer to.
+
+`--no-annotate` is a debug/ablation mode: it stops drawing the box and puts the
+region coordinates back into text. A text-only model can then solve part of the
+task (0.69 balanced accuracy before the fix), so do not use it for a headline
+counterfactual result.
+
+The default synthetic cohort has 12 ROIs/class. That validates plumbing, not
+learning; use `--per-class 24` or more for a learnability check, and replace it
+with real data as soon as the commands run end to end:
 
 ```bash
 pilot build --manifest your/manifest.csv --cells your/cells/ --out data/real --per-roi 6
@@ -156,8 +237,10 @@ Do **not** disable gradient checkpointing — it is what makes 24 GB possible.
 
 ## Cost
 
-A 4090 is roughly ¥1.5–2.5/h. The full P0+P1+P2 sequence is about 5–6 GPU-hours,
-so **under ¥15**. Do the data work on CPU, free.
+A 4090 is roughly ¥1.5–2.5/h. The full P0+P1+P2 sequence is about 5–6 GPU-hours
+on real data, so **under ¥15**. Measured on the 72-ROI synthetic cohort:
+P0 <1 min, P1 4.2 min, each P2 arm ~8 min, plus ~20 min of CPU data work.
+Do the data work on CPU, free.
 
 ## What to do with the result
 
@@ -220,19 +303,49 @@ independently instead of one total.
 | CPathOGen | grouped bootstrap (resample patients, not ROIs) and Benjamini–Hochberg → added `groups=` to `paired_bootstrap` and `benjamini_hochberg()` |
 | ASPECT / PathBind | no public repository found; only their reported numbers and the PathoVernier dataset are available |
 
+## Corrections made for the feasibility run (2026-10-21)
+
+These were found while validating the pilot; the details and measurements are in
+[`FEASIBILITY.md`](FEASIBILITY.md).
+
+| what was wrong | why it mattered | fix |
+|---|---|---|
+| the counterfactual prompt omitted the edit kind (and the translation vector) | the same image + box had both yes and no labels; the task was not a function of the observation | prompt now names the operation; translate points at a drawn arrow |
+| the prompt carried the box coordinates as text | a text-only classifier reached **0.69** balanced accuracy on held-out patients, above the 0.65 P1 gate | coordinates removed from the prompt; location is only the green box in the image (text-only now **0.50**) |
+| no box was drawn, despite the README saying the model sees one | the model had to map 0–1000 text coordinates onto patches, a different task | `annotate_edit` draws a green box and, for translate, an orange arrow |
+| the auxiliary heads used a global mean of image tokens | the 3×3 regional target is unlearnable from a mean, and the cf head could not see the edit region | both heads consume the image-token grid; structure head 3×3 pools, cf head pools the edit region |
+| the regional descriptor was normalised by cell quantiles and indexed x-major | target tiles did not line up with the image token grid | `describe(..., frame=...)` uses the image frame; row-major tile order |
+| translation vector was absent from the cf head features | the same (centre, radius, kind) had different labels for different directions | `MASK_DIM` 6 → 8 |
+| CellViT classes were factorised per ROI | the same class got different ids in different ROIs, corrupting the type block | class labels stay strings; one global vocabulary |
+| Otsu returned a bin centre below a constant background | 4/36 synthetic ROIs became all-foreground and silently fell back to ground-truth cells | threshold guard; `segment_dir` deletes stale output first; synth GT and `cells_seg` are separate |
+| P1/P2 evaluated on the training jsonl | gates measured memorisation, not generalisation | `pilot build --val-frac` patient-disjoint split; script evaluates `*_val.jsonl` |
+| `--no-aux` was described as LoRA-only | it still sees the cf examples through the LM loss | documented as the same-data-mix ablation; not a growth-only baseline |
+| Qwen3-VL was sized at 28×28 px/token | it uses 16 px patches × 2 merge = 32×32; the presets used ~391 of 512 tokens | `vision.PATCH=32`; `max_pixels` updated |
+| `transformers` had no upper bound | pip picks 5.x, which requires torch≥2.6 and failed to import here | extra pins `transformers>=4.57,<5` |
+| `--compare` keyed on `roi_id|gold` | several cf examples share a ROI/answer and collapsed in the dict | `ex_id` key |
+| doctor did not check coordinate scale | a cell table in slide coordinates produced finite but meaningless descriptors | >5% out-of-bounds cells is now a problem |
+| scikit-image was not a dependency | the documented `pilot segment` failed after a clean install | added to base dependencies |
+
 ## Honest notes
 
 - The counterfactual labels are exact (computed from the cell point set), but the *images* are
-  not edited — the model sees the original ROI plus a box. It must reason about what is inside
-  the box, which is the ability we want, but it is not the same as seeing an edited image.
+  not edited — the model sees the original ROI with a green box (and an orange arrow for
+  translate). It must reason about what would happen inside the box, which is the ability we
+  want, but it is not the same as seeing an edited image.
 - `build_cf_examples` computes one descriptor per ROI and reuses it for all edits of that ROI.
   That is correct for the structure head (the descriptor is of the *original* tissue) but means
   the auxiliary regression target does not vary within a ROI.
 - The synthetic cohort uses ring/solid/multifocal shapes. Good for plumbing, useless for
-  pathology claims.
+  pathology claims. P2 on it is likely to hit a ceiling or be underpowered; it validates
+  the training loop, not a pathology effect.
 - The bundled classical segmenter is a fallback. It is enough to prove the chain
   pixels → cells → topology works, but every number you intend to publish should come
-  from CellViT++ or HoVer-Net masks.
+  from CellViT++ or HoVer-Net masks. It also assigns one type to every nucleus, so the
+  type-composition block is trivial on synthetic `cells_seg`; the CellViT path keeps types.
+- The prompt defines "architecture change" operationally (connected groups or enclosed
+  lumina). Report that definition; a human's notion of architecture is broader.
+- Include the text-only baseline in the paper. If a future edit makes coordinates textual
+  again, the baseline will catch the shortcut.
 
 ## License
 

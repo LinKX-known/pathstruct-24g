@@ -51,15 +51,40 @@ class TestSyntheticPipeline(unittest.TestCase):
 
     def test_cf_examples_are_balanced_and_labelled(self):
         df = read_manifest(self.root / "data" / "manifest.csv")
-        ex = build_cf_examples(df, self.root / "data" / "cells", per_roi=4, seed=1)
+        ex = build_cf_examples(
+            df,
+            self.root / "data" / "cells",
+            per_roi=6,
+            seed=1,
+            annotate=True,
+            annotate_dir=self.root / "data" / "annotated",
+        )
         self.assertGreater(len(ex), 0)
         rate = float(np.mean([e["changed"] for e in ex]))
         self.assertGreater(rate, 0.15)
         self.assertLess(rate, 0.85)
         for e in ex:
             self.assertIn(e["answer"], ("yes", "no"))
-            self.assertIn("normalised 0-1000", e["question"])
+            self.assertIn("green box", e["question"])
+            self.assertIn("connected cell groups", e["question"])
+            # The prompt must not contain coordinates: a text-only model must
+            # not be able to learn a position prior.
+            self.assertNotIn("[", e["question"])
+            self.assertIn(e["kind"], ("collapse", "expand", "translate"))
             self.assertEqual(len(e["descriptor"]), len(ex[0]["descriptor"]))
+            self.assertTrue(0.0 <= e["center"][0] <= 1.0)
+            self.assertTrue(0.0 <= e["center"][1] <= 1.0)
+            self.assertGreater(e["radius"], 0.0)
+        # Balance within kind: a text-only model must not be able to read the
+        # edit kind and guess the majority label.
+        for kind in ("collapse", "expand", "translate"):
+            labels = [e["changed"] for e in ex if e["kind"] == kind]
+            self.assertEqual(sum(labels), len(labels) - sum(labels), kind)
+        # translate prompts point at the visual arrow; the direction itself is
+        # not text (otherwise a text model could read position/direction).
+        self.assertTrue(
+            all("orange arrow" in e["question"] for e in ex if e["kind"] == "translate")
+        )
 
     def test_jsonl_roundtrip(self):
         df = read_manifest(self.root / "data" / "manifest.csv")
@@ -119,9 +144,6 @@ class TestEvalHelpers(unittest.TestCase):
         self.assertLessEqual(out["lo"], out["delta"])
         self.assertGreaterEqual(out["hi"], out["delta"])
 
-
-if __name__ == "__main__":
-    unittest.main()
 
 class TestCellVitBridge(unittest.TestCase):
     def test_parse_cellvit_json(self):
@@ -190,6 +212,201 @@ class TestVisionAndExamples(unittest.TestCase):
                 self.assertEqual(len(r["center"]), 2)
         finally:
             shutil.rmtree(root, ignore_errors=True)
+
+
+class TestTaskDesign(unittest.TestCase):
+    def test_parse_verbose_binary(self):
+        self.assertEqual(parse("Yes, because the ring closes.", ["yes", "no"]), "yes")
+        self.assertEqual(parse("No, the sheet stays connected.", ["yes", "no"]), "no")
+        self.assertIsNone(parse("no idea", ["yes", "no"]))
+        self.assertIsNone(parse("There is not enough information.", ["yes", "no"]))
+
+    def test_patient_splits_are_disjoint(self):
+        from pilot.data import patient_splits
+
+        root = Path(__file__).resolve().parent / "_tmp_split"
+        shutil.rmtree(root, ignore_errors=True)
+        try:
+            df = make_synthetic(root, per_class=3, n_cells=140, size=128, seed=5)
+            growth = build_growth_examples(df)
+            cf = build_cf_examples(df, root / "cells", per_roi=2, seed=0)
+            gtr, gval, ctr, cval = patient_splits(growth, cf, val_frac=0.4, seed=0)
+            self.assertTrue(gtr and gval and ctr and cval)
+            gtr_p = {r["patient_id"] for r in gtr}
+            gval_p = {r["patient_id"] for r in gval}
+            ctr_p = {r["patient_id"] for r in ctr}
+            cval_p = {r["patient_id"] for r in cval}
+            self.assertFalse(gtr_p & gval_p)
+            self.assertFalse(ctr_p & cval_p)
+            self.assertEqual(gval_p, cval_p)
+            all_p = {r["patient_id"] for r in growth} | {r["patient_id"] for r in cf}
+            self.assertEqual(gtr_p | gval_p, all_p)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_annotated_images_and_normalised_features(self):
+        root = Path(__file__).resolve().parent / "_tmp_annot"
+        shutil.rmtree(root, ignore_errors=True)
+        try:
+            df = make_synthetic(root, per_class=1, n_cells=140, size=256, seed=9)
+            rows = build_cf_examples(
+                df,
+                root / "cells",
+                per_roi=6,
+                seed=0,
+                annotate=True,
+                annotate_dir=root / "annotated",
+            )
+            self.assertTrue(rows)
+            for r in rows:
+                self.assertNotEqual(r["image"], r["source_image"])
+                self.assertTrue(Path(r["image"]).exists())
+                self.assertEqual(len(r["vector"]), 2)
+                self.assertEqual(len(r["box_1000"]), 4)
+                self.assertEqual(len(r["image_size"]), 2)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_min_affected_filters_empty_boxes(self):
+        from pilot.interventions import sample_interventions
+
+        rng = np.random.default_rng(0)
+        t = rng.uniform(0, 2 * np.pi, 120)
+        r = 0.7 + rng.normal(scale=0.02, size=120)
+        points = np.c_[r * np.cos(t), r * np.sin(t)]
+        out = sample_interventions(points, n=6, seed=0, min_affected=5)
+        self.assertTrue(out)
+        self.assertTrue(all(i.edit.affected >= 5 for i in out))
+
+    def test_prompt_matches_annotation_mode(self):
+        root = Path(__file__).resolve().parent / "_tmp_prompt"
+        shutil.rmtree(root, ignore_errors=True)
+        try:
+            df = make_synthetic(root, per_class=1, n_cells=140, size=256, seed=11)
+            plain = build_cf_examples(df, root / "cells", per_roi=6, seed=0)
+            self.assertTrue(plain)
+            self.assertTrue(all("0-1000 image coordinates" in r["question"] for r in plain))
+            self.assertTrue(all("green box" not in r["question"] for r in plain))
+            self.assertTrue(all(not r["annotated"] for r in plain))
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+    def test_regional_descriptor_uses_image_frame(self):
+        from pilot.structures import regional_descriptor
+
+        # (0,0) -> row 0 col 0; (99,0) -> row 0 col 2; (99,99) -> row 2 col 2.
+        # Row-major indexing must map the middle point to tile 2, not tile 6.
+        points = np.asarray([[0.0, 0.0], [99.0, 0.0], [99.0, 99.0]])
+        types = np.zeros(3, dtype=int)
+        out = regional_descriptor(
+            points, types, n_types=1, grid=3, frame=((0.0, 0.0), (100.0, 100.0))
+        )
+        self.assertAlmostEqual(out[0], 1 / 3)
+        self.assertAlmostEqual(out[2], 1 / 3)
+        self.assertAlmostEqual(out[8], 1 / 3)
+        self.assertAlmostEqual(out[9 + 2], 1 / 3)
+        self.assertAlmostEqual(out[9 + 8], 1 / 3)
+
+    def test_read_jsonl_accepts_json_array(self):
+        from pilot.data import read_jsonl, write_jsonl
+
+        root = Path(__file__).resolve().parent / "_tmp_json"
+        shutil.rmtree(root, ignore_errors=True)
+        try:
+            root.mkdir(parents=True)
+            path = root / "rows.json"
+            path.write_text('[{"a": 1}, {"a": 2}]', encoding="utf-8")
+            self.assertEqual(len(read_jsonl(path)), 2)
+            rows = [{"a": 1}, {"a": 2}]
+            write_jsonl(rows, root / "rows.jsonl")
+            self.assertEqual(len(read_jsonl(root / "rows.jsonl")), 2)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+class TestCellTypeVocabulary(unittest.TestCase):
+    def test_cellvit_types_are_global_not_per_roi(self):
+        import json as _json
+
+        from pilot.cells import (
+            cells_from_cellvit_dir,
+            global_type_index,
+            load_cells,
+        )
+
+        root = Path(__file__).resolve().parent / "_tmp_types"
+        shutil.rmtree(root, ignore_errors=True)
+        try:
+            (root / "json").mkdir(parents=True)
+            (root / "json" / "a_cells.json").write_text(
+                _json.dumps(
+                    {
+                        "cells": [
+                            {"centroid": [1, 1], "class": "Tumor"},
+                            {"centroid": [2, 2], "class": "Stroma"},
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            # ROI b has only Tumor. A per-ROI factorisation would call it 0
+            # here and 1 in ROI a.
+            (root / "json" / "b_cells.json").write_text(
+                _json.dumps({"cells": [{"centroid": [3, 3], "class": "Tumor"}]}),
+                encoding="utf-8",
+            )
+            cells_from_cellvit_dir(root / "json", root / "cells")
+            a_pts, a_types = load_cells(root / "cells" / "a.csv")
+            b_pts, b_types = load_cells(root / "cells" / "b.csv")
+            indexed, vocab = global_type_index([a_types, b_types])
+            tumor = vocab.index("Tumor")
+            self.assertEqual(indexed[0][0], tumor)
+            self.assertEqual(indexed[1][0], tumor)
+        finally:
+            shutil.rmtree(root, ignore_errors=True)
+
+
+class TestSpatialHeads(unittest.TestCase):
+    def test_grid_and_heads(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch not installed")
+
+        from pilot.heads import (
+            CounterfactualHead,
+            MASK_DIM,
+            StructureHead,
+            grid_from_hidden,
+        )
+
+        self.assertEqual(MASK_DIM, 8)
+        hidden = torch.randn(1, 9, 4)
+        mask = torch.ones(1, 9, dtype=torch.bool)
+        grid = grid_from_hidden(hidden, mask, torch.tensor([[1, 6, 6]]), merge_size=2)
+        self.assertEqual(tuple(grid.shape), (3, 3, 4))
+
+        struct = StructureHead(4, 5, hidden=8)
+        s = struct(grid)
+        self.assertEqual(tuple(s.shape), (1, 5))
+
+        cf = CounterfactualHead(4, hidden=8)
+        feats = torch.zeros(1, MASK_DIM)
+        feats[0, 2] = 0.2
+        logit = cf(grid, feats)
+        self.assertEqual(tuple(logit.shape), (1,))
+
+    def test_grid_rejects_mismatched_shapes(self):
+        try:
+            import torch
+        except ImportError:
+            self.skipTest("torch not installed")
+
+        from pilot.heads import grid_from_hidden
+
+        hidden = torch.randn(1, 8, 4)
+        mask = torch.ones(1, 8, dtype=torch.bool)
+        self.assertIsNone(grid_from_hidden(hidden, mask, torch.tensor([[1, 6, 6]])))
 
 
 if __name__ == "__main__":

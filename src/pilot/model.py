@@ -34,6 +34,15 @@ PRESETS: Dict[str, Dict[str, Any]] = {
         "image_tokens": 768,
         "max_length": 1536,
     },
+    # High-resolution check for small objects: 1024 visual tokens on the 4B
+    # model. Not needed for the main pilot; used to separate "the idea fails"
+    # from "the cells are smaller than a visual token".
+    "4b_bf16_1024": {
+        "model_id": "Qwen/Qwen3-VL-4B-Instruct",
+        "load_in_4bit": False,
+        "image_tokens": 1024,
+        "max_length": 2048,
+    },
 }
 
 
@@ -57,8 +66,8 @@ class ModelConfig:
 
     @property
     def max_pixels(self) -> int:
-        # Qwen-VL tokens are 28x28 pixels after the 2x2 merge
-        return int(28 * 28 * self.image_tokens)
+        # Qwen3-VL tokens are 32x32 pixels after the 16 px patch and 2x2 merge
+        return int(32 * 32 * self.image_tokens)
 
 
 def _has_flash_attn() -> bool:

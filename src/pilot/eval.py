@@ -19,9 +19,10 @@ def normalise(text: str) -> str:
 def parse(text: str, choices: Sequence[str]) -> Optional[str]:
     """Strict-ish parsing of a one-word answer.
 
-    Binary answers (yes/no) must match exactly, because "no idea" would
-    otherwise be scored as a confident "no". Word answers tolerate a trailing
-    clause ("acinar pattern" -> "acinar").
+    Binary answers tolerate a trailing explanation ("Yes, because ..." ->
+    "yes") but not an epistemic hedge: "no idea" must not be scored as a
+    confident "no". Word answers tolerate a trailing clause ("acinar pattern"
+    -> "acinar").
     """
     t = _LEAD.sub("", normalise(text)).split(",")[0].strip()
     if not t:
@@ -29,7 +30,17 @@ def parse(text: str, choices: Sequence[str]) -> Optional[str]:
     if t in choices:
         return t
     toks = t.split()
-    if toks and toks[0] in choices and max(len(c) for c in choices) > 3:
+    if not toks or toks[0] not in choices:
+        return None
+    binary = set(choices) == {"yes", "no"}
+    if binary:
+        rest = " ".join(toks[1:])
+        if re.search(
+            r"\b(idea|sure|information|clue|cannot|can't|unable|uncertain|unsure)\b", rest
+        ):
+            return None
+        return toks[0]
+    if max(len(c) for c in choices) > 3:
         return toks[0]
     return None
 
@@ -53,7 +64,8 @@ def generate_answer(model, processor, example: Dict[str, Any], image_tokens: int
     with Image.open(example["image"]) as im:
         image = fit_image(im.convert("RGB"), image_tokens)
         image.load()
-    inputs = processor(text=[text], images=[image], return_tensors="pt").to(model.device)
+    device = next(model.parameters()).device
+    inputs = processor(text=[text], images=[image], return_tensors="pt").to(device)
 
     with torch.no_grad():
         out = model.generate(**inputs, max_new_tokens=max_new_tokens, do_sample=False)
@@ -72,7 +84,14 @@ def evaluate(
 ) -> List[Dict[str, Any]]:
     model.eval()
     rows = []
-    subset = list(examples)[:limit] if limit else list(examples)
+    pool = list(examples)
+    if limit and limit < len(pool):
+        # Take a systematic sample across the whole pool. Slicing the first N
+        # rows would evaluate only the first few ROIs/classes.
+        step = len(pool) / float(limit)
+        subset = [pool[min(len(pool) - 1, int(i * step))] for i in range(limit)]
+    else:
+        subset = pool
     for i, ex in enumerate(subset, start=1):
         raw = ""
         try:
@@ -83,8 +102,11 @@ def evaluate(
         rows.append(
             {
                 "task": ex.get("task", ""),
+                "ex_id": ex.get("ex_id", ""),
                 "roi_id": ex.get("roi_id", ""),
                 "patient_id": ex.get("patient_id", ""),
+                "kind": ex.get("kind", ""),
+                "changed": ex.get("changed", ""),
                 "gold": normalise(ex["answer"]),
                 "pred": pred or "",
                 "raw": raw[:200],
@@ -105,11 +127,24 @@ def score(rows: Sequence[Dict[str, Any]]) -> Dict[str, float]:
     for g in sorted(set(golds)):
         mask = golds == g
         per_class[g] = float(y[mask].mean())
+    per_kind = {}
+    kinds = [str(r.get("kind", "")) for r in rows]
+    if any(kinds):
+        for k in sorted(set(k for k in kinds if k)):
+            mask = np.asarray([kk == k for kk in kinds])
+            per_kind[k] = {
+                "n": int(mask.sum()),
+                "accuracy": float(y[mask].mean()),
+                "parse_failures": int(
+                    sum(1 for r, m in zip(rows, mask) if m and not r["pred"])
+                ),
+            }
     return {
         "n": int(len(y)),
         "accuracy": float(y.mean()),
         "balanced_accuracy": float(np.mean(list(per_class.values()))),
         "per_class": per_class,
+        "per_kind": per_kind,
         "parse_failures": int(sum(1 for r in rows if not r["pred"])),
     }
 

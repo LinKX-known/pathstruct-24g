@@ -206,20 +206,42 @@ def _robust_unit(points: np.ndarray) -> np.ndarray:
     return np.clip((points - lo) / span, -0.2, 1.2)
 
 
+def _frame_unit(points: np.ndarray, frame) -> np.ndarray:
+    """Normalise into an explicit frame, normally ``((0, 0), (width, height))``.
+
+    The default :func:`_robust_unit` re-normalises by the cell quantiles. That
+    is useful for comparing descriptors across ROIs, but it does not line up
+    with the image's own 3x3 tiles. The structure head predicts the descriptor
+    from a 3x3 pooling of image tokens, so its target must use the image frame.
+    """
+    lo = np.asarray(frame[0], dtype=np.float64)
+    hi = np.asarray(frame[1], dtype=np.float64)
+    span = np.maximum(hi - lo, 1e-9)
+    return np.clip((points - lo) / span, -0.2, 1.2)
+
+
 def regional_descriptor(
     points: np.ndarray,
     types: Optional[np.ndarray] = None,
     n_types: int = 1,
     grid: int = GRID,
+    frame=None,
 ) -> np.ndarray:
-    """Per-tile cell-type composition, as fractions of all cells."""
+    """Per-tile cell-type composition, as fractions of all cells.
+
+    ``frame`` is ``((x0, y0), (x1, y1))`` in the same coordinates as
+    ``points``. Pass the image extent when the descriptor is a target for a
+    spatially pooled head; leave it ``None`` for quantile normalisation.
+    """
     x = np.asarray(points, dtype=np.float64)
     n = len(x)
     if n == 0:
         return np.zeros(grid * grid * (1 + n_types))
-    u = _robust_unit(x)
+    u = _robust_unit(x) if frame is None else _frame_unit(x, frame)
     cell = np.clip((u * grid).astype(int), 0, grid - 1)
-    flat = cell[:, 0] * grid + cell[:, 1]
+    # Row-major (y then x) to match adaptive_avg_pool2d's flatten order in the
+    # structure head; the previous x-major order silently transposed the tiles.
+    flat = cell[:, 1] * grid + cell[:, 0]
     if types is None:
         types = np.zeros(n, dtype=int)
     types = np.asarray(types).astype(int)
@@ -261,6 +283,7 @@ def describe(
     grid: int = GRID,
     cell_radius: Optional[float] = None,
     comp_radius: Optional[float] = None,
+    frame=None,
 ) -> Descriptor:
     topo = topology_summary(points, cell_radius=cell_radius, comp_radius=comp_radius)
     if not topo:
@@ -269,7 +292,7 @@ def describe(
         vec = np.concatenate(
             [
                 np.asarray([topo[k] for k in TOPO_KEYS], dtype=np.float64),
-                regional_descriptor(points, types, n_types=n_types, grid=grid),
+                regional_descriptor(points, types, n_types=n_types, grid=grid, frame=frame),
             ]
         )
     return Descriptor(values=vec, names=descriptor_names(n_types, grid))
