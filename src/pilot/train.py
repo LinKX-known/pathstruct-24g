@@ -30,6 +30,11 @@ class TrainConfig:
     # consistently unlearned on real data and diluted the topology loss.
     structure_dims: int = 0
     log_every: int = 10
+    # Save an intermediate adapter every N steps (0 = only the final one).
+    # The real-data runs are short and the balance between under- and
+    # overfitting is the main open question, so keep the trajectory to
+    # evaluate/early-stop afterwards.
+    checkpoint_every: int = 50
     save_dir: str = "out/pilot"
     max_new_tokens: int = 8
 
@@ -193,6 +198,8 @@ def run(
     warned_grid = False
 
     history: List[Dict[str, float]] = []
+    save_dir = Path(cfg.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     micro = 0
     for step in range(total_steps):
@@ -287,8 +294,18 @@ def run(
             if torch.cuda.is_available():
                 print(f"           vram {torch.cuda.max_memory_allocated() / 1024**3:.1f} GB", flush=True)
 
-    save_dir = Path(cfg.save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
+        if (
+            cfg.checkpoint_every
+            and (step + 1) % cfg.checkpoint_every == 0
+            and (step + 1) < total_steps
+        ):
+            ckpt = save_dir / f"checkpoint-{step + 1}"
+            ckpt.mkdir(parents=True, exist_ok=True)
+            model.save_pretrained(ckpt)
+            if heads is not None:
+                torch.save(heads.state_dict(), ckpt / "aux_heads.pt")
+            print(f"           checkpoint {ckpt}", flush=True)
+
     model.save_pretrained(save_dir)
     if heads is not None:
         torch.save(heads.state_dict(), save_dir / "aux_heads.pt")

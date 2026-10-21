@@ -189,6 +189,7 @@ def cmd_train(args) -> int:
         lam_cf=args.lam_cf,
         save_dir=args.out,
         log_every=args.log_every,
+        checkpoint_every=args.checkpoint_every,
         seed=args.seed,
         structure_dims=args.structure_dims,
     )
@@ -409,6 +410,13 @@ def build_parser() -> argparse.ArgumentParser:
     tr.add_argument("--no-aux", dest="no_aux", action="store_true")
     tr.add_argument("--out", default="out/pilot")
     tr.add_argument("--log-every", dest="log_every", type=int, default=10)
+    tr.add_argument(
+        "--checkpoint-every",
+        dest="checkpoint_every",
+        type=int,
+        default=50,
+        help="save an intermediate adapter every N steps (0 = final only)",
+    )
     tr.add_argument("--seed", type=int, default=0)
     tr.add_argument(
         "--structure-dims",
