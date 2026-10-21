@@ -29,6 +29,13 @@ types, 4 completely held-out tissues): cf head **0.588** over 2 seeds
 (1.3 epochs) and the structure head again has negative topology R². Full
 numbers, controls and next steps: [`FEASIBILITY.md`](FEASIBILITY.md).
 
+**2026-10-22 extension:** PanNuke 600 steps + topology-only reached **0.600**
+(blank 0.547; real−blank +5.3 pt, CI [0.5, 10.9]) — only +1.2 pt over 300
+steps. MoNuSeg 150-step topology-only averaged **0.594** (blank 0.489; expand
+0.750). Structure-head topology R² remained negative on both cohorts;
+dropping the 3×3 regional block was not the fix. Details:
+[`FEISHU_REPORT.md`](FEISHU_REPORT.md) §3.4.
+
 ## What the pilot can and cannot tell you
 
 | | |
