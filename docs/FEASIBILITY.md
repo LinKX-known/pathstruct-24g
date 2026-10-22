@@ -177,7 +177,7 @@ the held-out structure regression; the constraint is data scale and the target
 definition (especially `hole_area_frac`), not optimisation length. The
 counterfactual head keeps a small real signal (expand is the stable component),
 still below a robust 0.65. Full tables, CIs and the recovery timeline are in
-`FEISHU_REPORT.md` §3.4 / Appendix C.
+`RESULTS.md` §3.4 / Appendix C.
 
 ## Environment
 
@@ -385,7 +385,7 @@ task.
 
 The LM numbers above are yes/no *generation*. The modules the pilot is built
 around were also trained; evaluating them directly is the fair module-level
-test. `scripts/eval_heads.py` loads `aux_heads.pt` and runs the two heads on
+test. `scripts/eval/eval_heads.py` loads `aux_heads.pt` and runs the two heads on
 held-out patients.
 
 | adapter / data | cf head bal | cf AUC | blank cf bal | blank cf AUC | structure topology R² | blank structure R² |
@@ -606,23 +606,23 @@ pilot eval --data data/synth/growth_val.jsonl --adapter out/p2_aux  --out out/pr
 pilot eval --data data/synth/growth_val.jsonl --adapter out/p2_lora --out out/pred_lora.json \
   --compare out/pred_aux.json
 
-python scripts/probe_structure.py --aux out/p2_aux --lora out/p2_lora \
+python scripts/eval/probe_structure.py --aux out/p2_aux --lora out/p2_lora \
   --train data/synth/cf_train.jsonl --val data/synth/cf_val.jsonl
 
 # direct evaluation of the trained heads (the module-level test)
-python scripts/eval_heads.py --adapter out/p1_hard \
+python scripts/eval/eval_heads.py --adapter out/p1_hard \
   --data data/synth_hard/cf_val_bal.jsonl --preset 4b_bf16
-python scripts/eval_heads.py --adapter out/p1_hi \
+python scripts/eval/eval_heads.py --adapter out/p1_hi \
   --data data/synth_hi/cf_val_bal.jsonl --preset 4b_bf16_1024
-python scripts/eval_heads.py --adapter out/p1_hard \
+python scripts/eval/eval_heads.py --adapter out/p1_hard \
   --data data/synth_hard/cf_val_bal_blank.jsonl --preset 4b_bf16
-python scripts/eval_heads.py --adapter out/p1_hi \
+python scripts/eval/eval_heads.py --adapter out/p1_hi \
   --data data/synth_hi/cf_val_bal_blank.jsonl --preset 4b_bf16_1024
 
 # strict non-empty control, 384 px
 pilot build --manifest data/synth/manifest.csv --cells data/synth/cells_seg \
   --out data/synth_hard --per-roi 6 --val-frac 0.3 --min-affected 5
-python scripts/balance_cf.py --train data/synth_hard/cf_train.jsonl \
+python scripts/build/balance_cf.py --train data/synth_hard/cf_train.jsonl \
   --val data/synth_hard/cf_val.jsonl \
   --out-train data/synth_hard/cf_train_bal.jsonl \
   --out-val data/synth_hard/cf_val_bal.jsonl
@@ -635,7 +635,7 @@ pilot eval --data data/synth_hard/cf_val_bal.jsonl --adapter out/p1_hard \
 pilot synth --out data/synth_hi --per-class 24 --size 1024 --n-cells 80 --dot-radius 10
 pilot build --manifest data/synth_hi/manifest.csv --cells data/synth_hi/cells \
   --out data/synth_hi --per-roi 6 --val-frac 0.3 --min-affected 5
-python scripts/balance_cf.py --train data/synth_hi/cf_train.jsonl \
+python scripts/build/balance_cf.py --train data/synth_hi/cf_train.jsonl \
   --val data/synth_hi/cf_val.jsonl \
   --out-train data/synth_hi/cf_train_bal.jsonl \
   --out-val data/synth_hi/cf_val_bal.jsonl
@@ -643,14 +643,14 @@ pilot train --cf data/synth_hi/cf_train_bal.jsonl --steps 150 \
   --preset 4b_bf16_1024 --out out/p1_hi
 pilot eval --data data/synth_hi/cf_val_bal.jsonl --adapter out/p1_hi \
   --preset 4b_bf16_1024 --out out/pred_p1_hi.json
-python scripts/make_blank_control.py --data data/synth_hi/cf_val_bal.jsonl \
+python scripts/controls/make_blank_control.py --data data/synth_hi/cf_val_bal.jsonl \
   --out data/synth_hi/blank --jsonl data/synth_hi/cf_val_bal_blank.jsonl
 pilot eval --data data/synth_hi/cf_val_bal_blank.jsonl --adapter out/p1_hi \
   --preset 4b_bf16_1024 --out out/pred_p1_hi_blank.json
 ```
 
 ```bash
-python scripts/make_blank_control.py --data data/synth/cf_val.jsonl \
+python scripts/controls/make_blank_control.py --data data/synth/cf_val.jsonl \
   --out data/synth/blank --jsonl data/synth/cf_val_blank.jsonl
 pilot eval --data data/synth/cf_val_blank.jsonl --adapter out/p1 \
   --preset 4b_bf16 --out out/pred_p1_blank.json

@@ -258,10 +258,10 @@ Held-out（60 cf；14 患者；final 150 步）：
 ## 6. 交付物与复现
 
 - 完整技术报告：`FEASIBILITY.md`
-- 本飞书报告：`FEISHU_REPORT.md` / `FEISHU_REPORT.docx`
-- 真实数据导入：`scripts/import_monuseg.py`、`scripts/import_pannuke.py`
-- 头评估：`scripts/eval_heads.py`、`scripts/bootstrap_heads.py`
-- 对照：`scripts/make_blank_control.py`、`scripts/balance_cf.py`
+- 本飞书报告：`RESULTS.md` / `RESULTS.docx`
+- 真实数据导入：`scripts/data/import_monuseg.py`、`scripts/data/import_pannuke.py`
+- 头评估：`scripts/eval/eval_heads.py`、`scripts/eval/bootstrap_heads.py`
+- 对照：`scripts/controls/make_blank_control.py`、`scripts/build/balance_cf.py`
 - 测试：`python -m pytest tests/` → **23 passed**
 - 代码与报告已提交并推送到 `feasibility/pilot-fixes` 分支（commit `2715637`、`561b418`、`89e8a25`）；原始预测/头结果在 `out/heads_*`、`out/pred_*`
 
@@ -269,26 +269,26 @@ Held-out（60 cf；14 患者；final 150 步）：
 
 ```bash
 # MoNuSeg
-python scripts/import_monuseg.py \
+python scripts/data/import_monuseg.py \
   --train-parquet .../data/train-*.parquet \
   --test-parquet  .../data/test-*.parquet \
   --out data/real/monuseg
 pilot build --manifest data/real/monuseg/manifest_train.csv \
   --cells data/real/monuseg/cells --out data/real/monuseg_train \
   --per-roi 6 --val-frac 0.2 --min-affected 5
-python scripts/balance_cf.py --train data/real/monuseg_train/cf_train.jsonl \
+python scripts/build/balance_cf.py --train data/real/monuseg_train/cf_train.jsonl \
   --val data/real/monuseg_train/cf_val.jsonl \
   --out-train data/real/monuseg_train/cf_train_bal.jsonl \
   --out-val data/real/monuseg_train/cf_val_bal.jsonl
 
 # PanNuke
-python scripts/import_pannuke.py \
+python scripts/data/import_pannuke.py \
   --parquet .../fold1-*.parquet --out data/real/pannuke \
   --val-tissues breast,colon,bile,cervix --min-cells 16
 pilot build --manifest data/real/pannuke/manifest_train.csv \
   --cells data/real/pannuke/cells --out data/real/pannuke_train \
   --per-roi 6 --val-frac 0 --min-affected 5 --min-cells 16
-python scripts/balance_cf.py --train data/real/pannuke_train/cf.jsonl \
+python scripts/build/balance_cf.py --train data/real/pannuke_train/cf.jsonl \
   --val data/real/pannuke_train/cf.jsonl \
   --out-train data/real/pannuke_train/cf_train_bal.jsonl \
   --out-val /tmp/pannuke_bal.jsonl
@@ -296,10 +296,10 @@ python scripts/balance_cf.py --train data/real/pannuke_train/cf.jsonl \
 # 训练 + 头评估
 pilot train --cf data/real/monuseg_train/cf_train_bal.jsonl --steps 150 \
   --preset 4b_bf16_1024 --out out/p1_real_s0
-python scripts/eval_heads.py --adapter out/p1_real_s0 \
+python scripts/eval/eval_heads.py --adapter out/p1_real_s0 \
   --data data/real/monuseg_test/cf_bal.jsonl --preset 4b_bf16_1024 \
   --out out/heads_real_s0.json
-python scripts/bootstrap_heads.py --real out/heads_real_s0.json \
+python scripts/eval/bootstrap_heads.py --real out/heads_real_s0.json \
   --blank out/heads_blank_s0.json
 ```
 
@@ -308,7 +308,7 @@ python scripts/bootstrap_heads.py --real out/heads_real_s0.json \
 ## 7. 飞书文档
 
 - 飞书 CLI：`@larksuite/cli 1.0.98`（`lark-cli`），app `cli_aa5c394ff9b8dbe1`，user identity 已授权（docs + drive scope）。
-- 本文档由 `lark-cli docs +create --doc-format markdown --content -` 从 `FEISHU_REPORT.md` 创建；`FEISHU_REPORT.docx` 是离线备份。
+- 本文档由 `lark-cli docs +create --doc-format markdown --content -` 从 `RESULTS.md` 创建；`RESULTS.docx` 是离线备份。
 - **飞书文档链接**：https://rcn9izkq6bgo.feishu.cn/docx/TzuId4WBSoeowXxgTmncL0BGnSf
 - 文档 ID：`TzuId4WBSoeowXxgTmncL0BGnSf`；后续更新用 `lark-cli docs +update --document-id TzuId4WBSoeowXxgTmncL0BGnSf ...`。
 
@@ -371,7 +371,7 @@ python scripts/bootstrap_heads.py --real out/heads_real_s0.json \
 
 21. 按官方指南安装 `npm install -g @larksuite/cli` → `lark-cli 1.0.98`。
 22. `lark-cli config` 已有 app `cli_aa5c394ff9b8dbe1`；user token 的 refresh token 被吊销；发起 `auth login --domain docs,drive --no-wait --json` device flow，用户扫码/打开链接授权；`auth login --device-code` 完成，`auth status` 显示 user identity ready，scopes 包含 `docx:document:create`、`drive:file:upload`、`docs:document:import` 等。
-23. 用 `--dry-run` 验证 `docs +create --doc-format markdown`；`--content @file` 被 `/root` 保护路径拦截，改用 stdin：`cat FEISHU_REPORT.md | lark-cli docs +create ... --content -`。
+23. 用 `--dry-run` 验证 `docs +create --doc-format markdown`；`--content @file` 被 `/root` 保护路径拦截，改用 stdin：`cat RESULTS.md | lark-cli docs +create ... --content -`。
 24. 训练/评估结束后，把 3.4 的新结果填入本报告，用上述命令创建飞书文档，并回填文档链接。
 
 ### A6：2026-10-22 断点恢复与防过拟合监控
@@ -379,7 +379,7 @@ python scripts/bootstrap_heads.py --real out/heads_real_s0.json \
 25. **中断与恢复**：上一轮 PanNuke 600 在 **step 400/600、约 31 分钟**处被中断；训练脚本只在结束时保存，没有可续的 checkpoint，因此无法续跑。2026-10-22 02:51 用 `setsid` 独立进程重跑完整 600 步（02:51–03:38，46.2 分钟）。重跑曲线（step 100→600）：lm 0.261/0.215/0.251/0.248/0.163/0.134；cf 0.527/0.518/0.581/0.694/0.357/0.364；struct 0.032/0.027/0.020/0.028/0.007/0.018。前一次在 ~31 分钟被杀的进程这次存活，说明独立进程组解决了会话中断导致的进程清理。
 26. **防过拟合/欠拟合监控**：训练脚本新增 `--checkpoint-every`（默认 50 步），MoNuSeg topology-only 3 seeds 额外保存 `checkpoint-50/100`。训练集 cf loss：seed 0 = 0.530 → 0.170 → 0.016；seed 1 = 0.283 → 0.210 → 0.048；seed 2 = 0.663 → 0.131 → 0.004（150 步全部接近训练集记忆）。这些中间 checkpoint 用于 held-out 早停比较，避免把过拟合终点当作唯一结果。
 27. **评估**：8 组正式头评估（PanNuke600：620 条 real + 620 条 blank；MoNuSeg topo：60 条 × 3 seeds × real/blank），再加 6 组中间 checkpoint 的 held-out real 评估；bootstrap 按患者/组织分组重采样 5000 次。新结果见 §3.4 与附录 C。
-28. **交付**：把新结果填回本报告 §3.4、附录 C，补附录 A/B；重新生成 `FEISHU_REPORT.docx`；用 `lark-cli docs +create --doc-format markdown --content -` 创建飞书文档并回填链接；代码与报告推送到 `feasibility/pilot-fixes` 分支。
+28. **交付**：把新结果填回本报告 §3.4、附录 C，补附录 A/B；重新生成 `RESULTS.docx`；用 `lark-cli docs +create --doc-format markdown --content -` 创建飞书文档并回填链接；代码与报告推送到 `feasibility/pilot-fixes` 分支。
 
 ---
 
@@ -411,15 +411,15 @@ python scripts/bootstrap_heads.py --real out/heads_real_s0.json \
 | 文件 | 用途 |
 |---|---|
 | `FEASIBILITY.md` | 完整技术可行性报告（合成 + 真实 + 控制 + 限制 + 复现） |
-| `FEISHU_REPORT.md` | 本飞书报告源文件 |
-| `FEISHU_REPORT.docx` | Word 离线备份 |
-| `scripts/import_monuseg.py` | MoNuSeg parquet → 图像 + cell table + train/test manifest |
-| `scripts/import_pannuke.py` | PanNuke parquet → 上采样图像 + 5 类 cell table + 15/4 组织 split |
-| `scripts/eval_heads.py` | 直接评估训练后的 structure/cf 头（real/blank），支持 topology-only |
-| `scripts/bootstrap_heads.py` | 患者/组织级 bootstrap：balanced、AUC、real−blank、structure R² |
-| `scripts/balance_cf.py` | 按 kind/label 严格平衡 cf 数据 |
-| `scripts/make_blank_control.py` | 生成 blank-box 对照（box / before_after） |
-| `scripts/probe_structure.py` | 线性结构探针（aux vs no-aux backbone） |
+| `RESULTS.md` | 本飞书报告源文件 |
+| `RESULTS.docx` | Word 离线备份 |
+| `scripts/data/import_monuseg.py` | MoNuSeg parquet → 图像 + cell table + train/test manifest |
+| `scripts/data/import_pannuke.py` | PanNuke parquet → 上采样图像 + 5 类 cell table + 15/4 组织 split |
+| `scripts/eval/eval_heads.py` | 直接评估训练后的 structure/cf 头（real/blank），支持 topology-only |
+| `scripts/eval/bootstrap_heads.py` | 患者/组织级 bootstrap：balanced、AUC、real−blank、structure R² |
+| `scripts/build/balance_cf.py` | 按 kind/label 严格平衡 cf 数据 |
+| `scripts/controls/make_blank_control.py` | 生成 blank-box 对照（box / before_after） |
+| `scripts/eval/probe_structure.py` | 线性结构探针（aux vs no-aux backbone） |
 
 > 注：`data/`、`out/` 被 `.gitignore` 忽略；模型/Qwen 缓存在 `/root/.cache/huggingface`。代码与报告已提交并推送到 `feasibility/pilot-fixes` 分支（commit `2715637`、`561b418`、`89e8a25`）。
 
@@ -489,7 +489,7 @@ python scripts/bootstrap_heads.py --real out/heads_real_s0.json \
 - 新实验：`out/p1_pannuke600_s0/`、`out/p1_real_topo_s0/1/2/`（含 `checkpoint-50/100`）。
 - 新评估 JSON：`out/heads_pannuke600_{real,blank}_s0.json`、`out/heads_topo_{real,blank}_s{0,1,2}.json`、`out/heads_topo_real_s{0,1,2}_ck{50,100}.json`。
 - 对照：`data/synth/cf_val_blank.jsonl`、`data/synth_hi/cf_val_bal_blank.jsonl`、`data/real/monuseg_test/cf_bal_blank.jsonl`、`data/real/pannuke_test/cf_bal_blank.jsonl`。
-- 技术报告：`FEASIBILITY.md`；本报告：`FEISHU_REPORT.md` / `.docx`。
+- 技术报告：`FEASIBILITY.md`；本报告：`RESULTS.md` / `.docx`。
 
 ### C3：关键复现命令
 
@@ -504,38 +504,38 @@ pilot train --cf data/synth/cf_train.jsonl --steps 150 --preset 4b_bf16 --out ou
 pilot eval  --data data/synth/cf_val.jsonl --adapter out/p1 --preset 4b_bf16 --out out/pred_p1.json
 
 # 真实 MoNuSeg
-python scripts/import_monuseg.py --train-parquet ... --test-parquet ... --out data/real/monuseg
+python scripts/data/import_monuseg.py --train-parquet ... --test-parquet ... --out data/real/monuseg
 pilot build --manifest data/real/monuseg/manifest_train.csv --cells data/real/monuseg/cells \
   --out data/real/monuseg_train --per-roi 6 --val-frac 0.2 --min-affected 5
-python scripts/balance_cf.py --train data/real/monuseg_train/cf_train.jsonl \
+python scripts/build/balance_cf.py --train data/real/monuseg_train/cf_train.jsonl \
   --val data/real/monuseg_train/cf_val.jsonl \
   --out-train data/real/monuseg_train/cf_train_bal.jsonl \
   --out-val data/real/monuseg_train/cf_val_bal.jsonl
 pilot train --cf data/real/monuseg_train/cf_train_bal.jsonl --steps 150 \
   --preset 4b_bf16_1024 --out out/p1_real_s0
-python scripts/eval_heads.py --adapter out/p1_real_s0 \
+python scripts/eval/eval_heads.py --adapter out/p1_real_s0 \
   --data data/real/monuseg_test/cf_bal.jsonl --preset 4b_bf16_1024 --out out/heads_real_s0.json
-python scripts/bootstrap_heads.py --real out/heads_real_s0.json --blank out/heads_blank_s0.json
+python scripts/eval/bootstrap_heads.py --real out/heads_real_s0.json --blank out/heads_blank_s0.json
 
 # 真实 PanNuke
-python scripts/import_pannuke.py --parquet .../fold1-*.parquet --out data/real/pannuke \
+python scripts/data/import_pannuke.py --parquet .../fold1-*.parquet --out data/real/pannuke \
   --val-tissues breast,colon,bile,cervix --min-cells 16
 pilot build --manifest data/real/pannuke/manifest_train.csv --cells data/real/pannuke/cells \
   --out data/real/pannuke_train --per-roi 6 --val-frac 0 --min-affected 5 --min-cells 16
-python scripts/balance_cf.py --train data/real/pannuke_train/cf.jsonl \
+python scripts/build/balance_cf.py --train data/real/pannuke_train/cf.jsonl \
   --val data/real/pannuke_train/cf.jsonl \
   --out-train data/real/pannuke_train/cf_train_bal.jsonl \
   --out-val /tmp/pannuke_bal.jsonl
 pilot train --cf data/real/pannuke_train/cf_train_bal.jsonl --steps 600 \
   --grad-accum 8 --seed 0 --log-every 100 --preset 4b_bf16_1024 --structure-dims 5 \
   --out out/p1_pannuke600_s0
-python scripts/eval_heads.py --adapter out/p1_pannuke600_s0 \
+python scripts/eval/eval_heads.py --adapter out/p1_pannuke600_s0 \
   --data data/real/pannuke_test/cf_bal.jsonl --preset 4b_bf16_1024 \
   --out out/heads_pannuke600_real_s0.json
-python scripts/eval_heads.py --adapter out/p1_pannuke600_s0 \
+python scripts/eval/eval_heads.py --adapter out/p1_pannuke600_s0 \
   --data data/real/pannuke_test/cf_bal_blank.jsonl --preset 4b_bf16_1024 \
   --out out/heads_pannuke600_blank_s0.json
-python scripts/bootstrap_heads.py --real out/heads_pannuke600_real_s0.json \
+python scripts/eval/bootstrap_heads.py --real out/heads_pannuke600_real_s0.json \
   --blank out/heads_pannuke600_blank_s0.json
 
 # 3.4 扩展：MoNuSeg topology-only + 每 50 步 checkpoint（早停比较）
@@ -543,14 +543,14 @@ for s in 0 1 2; do
   pilot train --cf data/real/monuseg_train/cf_train_bal.jsonl --steps 150 \
     --grad-accum 8 --seed $s --preset 4b_bf16_1024 --structure-dims 5 \
     --checkpoint-every 50 --out out/p1_real_topo_s$s
-  python scripts/eval_heads.py --adapter out/p1_real_topo_s$s \
+  python scripts/eval/eval_heads.py --adapter out/p1_real_topo_s$s \
     --data data/real/monuseg_test/cf_bal.jsonl --preset 4b_bf16_1024 \
     --out out/heads_topo_real_s$s.json
-  python scripts/eval_heads.py --adapter out/p1_real_topo_s$s \
+  python scripts/eval/eval_heads.py --adapter out/p1_real_topo_s$s \
     --data data/real/monuseg_test/cf_bal_blank.jsonl --preset 4b_bf16_1024 \
     --out out/heads_topo_blank_s$s.json
   for ck in 50 100; do
-    python scripts/eval_heads.py --adapter out/p1_real_topo_s$s/checkpoint-$ck \
+    python scripts/eval/eval_heads.py --adapter out/p1_real_topo_s$s/checkpoint-$ck \
       --data data/real/monuseg_test/cf_bal.jsonl --preset 4b_bf16_1024 \
       --out out/heads_topo_real_s${s}_ck${ck}.json
   done

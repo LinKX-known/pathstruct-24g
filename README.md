@@ -7,6 +7,22 @@ which stays the full method. Here we only ask one question:
 > On a single RTX 4090 (24 GB), does training a model to judge **structural changes**
 > move the needle, or is the idea dead?
 
+## Repository layout
+
+| path | what |
+|---|---|
+| src/pilot/ | the pipeline: structures, interventions, dataset builders, heads, train loop, evaluation |
+| scripts/data/ | import MoNuSeg / PanNuke exports into manifest.csv + cells/ |
+| scripts/build/ | balance counterfactual sets by edit kind and label |
+| scripts/eval/ | evaluate trained heads, bootstrap confidence intervals, probe the structure signal |
+| scripts/controls/ | blank-box control generation |
+| docs/RESULTS.md | the feasibility report: numbers, controls, what failed and why |
+| docs/FEASIBILITY.md | full technical report, including the bugs that were found |
+| 	ests/ | 26 CPU tests: python -m unittest discover -s tests -t . |
+
+Everything below is the current state of the pilot; the older easibility/pilot-fixes
+branch has been merged into main.
+
 **Feasibility run (2026-10-21):** the easy LM task is learnable (0.523 → 0.674
 on held-out patients; text-only and box-only controls both 0.500), **but the
 0.674 is largely a shortcut**: 14% of validation boxes are empty and trivially
@@ -27,14 +43,14 @@ this 37-image cohort (topology R² negative). PanNuke (405 train patches, 5 cell
 types, 4 completely held-out tissues): cf head **0.588** over 2 seeds
 (0.595/0.582), blank 0.530, box-geometry 0.577, but the head is underfit
 (1.3 epochs) and the structure head again has negative topology R². Full
-numbers, controls and next steps: [`FEASIBILITY.md`](FEASIBILITY.md).
+numbers, controls and next steps: [`docs/FEASIBILITY.md`](docs/FEASIBILITY.md).
 
 **2026-10-22 extension:** PanNuke 600 steps + topology-only reached **0.600**
 (blank 0.547; real−blank +5.3 pt, CI [0.5, 10.9]) — only +1.2 pt over 300
 steps. MoNuSeg 150-step topology-only averaged **0.594** (blank 0.489; expand
 0.750). Structure-head topology R² remained negative on both cohorts;
 dropping the 3×3 regional block was not the fix. Details:
-[`FEISHU_REPORT.md`](FEISHU_REPORT.md) §3.4.
+[`docs/RESULTS.md`](docs/RESULTS.md) §3.4.
 
 ## What the pilot can and cannot tell you
 
@@ -54,7 +70,7 @@ The feasibility run is a concrete example of that failure mode: the easy
 counterfactual task is learnable, but the strict non-empty version is 0.500 at
 384 px (144 visual tokens) and only 0.534 at 1024 px (1024 tokens,
 ground-truth cells). See the resolution check in
-[`FEASIBILITY.md`](FEASIBILITY.md) before interpreting a P1 result.
+[`docs/FEASIBILITY.md`](docs/FEASIBILITY.md) before interpreting a P1 result.
 
 ## Three pilots, three gates
 
@@ -69,7 +85,7 @@ P1 stuck at 0.5 means the model cannot learn it from this much data — add data
 The feasibility run found one more failure mode: a P1 pass can come from
 **empty boxes** (always "no"). Rebuild with `--min-affected 5` and report the
 non-empty subset; the 384 px strict control was at chance. See
-[`FEASIBILITY.md`](FEASIBILITY.md).
+[`docs/FEASIBILITY.md`](docs/FEASIBILITY.md).
 P2 flat means the auxiliary signal does not transfer — but first check that the
 baseline is not already at 1.000 (a ceiling makes P2 uninformative), then check
 `λ` and whether gradients reach the backbone. The feasibility run hit exactly
@@ -211,7 +227,7 @@ pilot segment --images data/synth/images --out data/synth/cells_seg --backend cl
 pilot build --manifest data/synth/manifest.csv --cells data/synth/cells_seg \
   --out data/synth --per-roi 6 --val-frac 0.3
 # optional, recommended for a structural benchmark: add --min-affected 5
-# (empty boxes are always "no" and are a free shortcut; see FEASIBILITY.md)
+# (empty boxes are always "no" and are a free shortcut; see docs/FEASIBILITY.md)
 
 # 1. P0 — zero shot on held-out patients
 pilot p0 --data data/synth/cf_val.jsonl --preset 4b_bf16
@@ -342,7 +358,7 @@ independently instead of one total.
 ## Corrections made for the feasibility run (2026-10-21)
 
 These were found while validating the pilot; the details and measurements are in
-[`FEASIBILITY.md`](FEASIBILITY.md).
+[`docs/FEASIBILITY.md`](docs/FEASIBILITY.md).
 
 | what was wrong | why it mattered | fix |
 |---|---|---|
