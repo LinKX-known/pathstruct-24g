@@ -641,4 +641,4 @@ python scripts/eval/diagnose_structure.py \
 
 - 完整计划：`docs/P2_TOPOLOGY_PLAN.md`
 - 相关代码：TopoSlide <https://github.com/plevritis-lab/TopoSlide>、PMIL <https://github.com/ahmadobeid/PMIL>、TG-HEM <https://github.com/caki35/TGHEM>、GeoTop <https://github.com/MorillaLab/GeoTop>、DHMC <https://bmirds.github.io/LungCancer/>、DeepSlide <https://github.com/BMIRDS/deepslide>。
-- 当前本地分支：`research/topology-diagnostics`（基于 `origin/main`，未 commit/push）；测试 **49 passed**。
+- 当前分支：`research/topology-diagnostics`（基于 `origin/main`，已提交并推送到 origin，commit `faccb23`）；测试 **49 passed**。GitHub 分支：<https://github.com/LinKX-known/pathstruct-24g/tree/research/topology-diagnostics>
