@@ -105,6 +105,7 @@ def evaluate(
                 "ex_id": ex.get("ex_id", ""),
                 "roi_id": ex.get("roi_id", ""),
                 "patient_id": ex.get("patient_id", ""),
+                "wsi_id": ex.get("wsi_id", ""),
                 "kind": ex.get("kind", ""),
                 "changed": ex.get("changed", ""),
                 "gold": normalise(ex["answer"]),

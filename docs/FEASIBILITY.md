@@ -25,7 +25,11 @@ topology and the strict-384 counterfactual head learns a real visual signal —
 see the module evaluation below.
 
 **Bottom line (LM readout):** the pipeline is validated; the *language* yes/no
-task is shortcut-driven at 384 px and not learned at 1024 px.
+task is shortcut-driven at 384 px and not learned at 1024 px. On real data the
+LM's training cf loss reaches 0.004–0.048 (it memorises 226 rows) while the
+held-out readout stays near 0.50, so this is a **data-size/generalisation**
+failure, not evidence that the representation is unreadable: the same
+backbone's auxiliary head reaches 0.61 on the same rows.
 
 **Bottom line (module readout):** the modules do learn. The structure head
 reaches topology R² 0.315 (strict 384) / 0.411 (strict 1024) on held-out
@@ -40,20 +44,32 @@ transfer are the open halves.**
 **Real H&E (MoNuSeg, 37 train / 14 test patients):** the counterfactual head
 averages **0.611** over 3 seeds (0.583/0.600/0.650), with blank 0.500 and
 box-geometry 0.467; the **expand** edit is stable at 0.722, translate is ~0.56,
-collapse has only 8 test examples. The **structure head does not generalise**
-on this cohort (topology R² negative for every seed).
+collapse has only 8 test examples. The **structure head's old five-dimension mean R² is negative** on this
+cohort, but that average is dominated by the zero-inflated `hole_area_frac`;
+the per-dimension diagnostics in `docs/P2_TOPOLOGY_PLAN.md` show weak but
+non-zero signal on the connectivity/persistence dims and a genuine failure on
+the lumen-area dim.
 
 **Real H&E (PanNuke, 405 train / 160 held-out patches, 4 untouched tissues):**
 the cf head is **0.588** over 2 seeds (0.595/0.582), blank 0.530, box-geometry
 0.577; real-minus-blank is +8.1 / +3.9 pt, but the training loss stayed at
 0.5–0.8 (underfit, 1.3 epochs) and the score is only ~1 pt above the geometry
-prior. The structure head again does **not** generalise (topology R² negative).
+prior. The old five-dimension mean R² is again negative, but with a train-mean
+baseline the non-degenerate dims average **+0.13** with non-degenerate
+Spearman **0.47**, and `h0_sum` reaches R² **+0.52** / Spearman **0.71**;
+`hole_area_frac` is genuinely unlearned
+(train-mean baseline R² −0.02, model −31.2). The correct statement is
+"zero-inflated lumen area fails", not "all structure dims fail".
 
-**Across both real cohorts:** the counterfactual head carries a small but real
-visual signal (MoNuSeg expand 0.722; PanNuke translate 0.613; real > blank),
-while the **descriptor/structure head fails on real H&E** at this data scale
-(37–405 images). The real-data idea is partially supported for the cf task, not
-yet for the structural regression.
+**Across both real cohorts:** MoNuSeg shows a small but real visual signal
+(expand 0.722; cf 0.611 vs geometry 0.467), while **PanNuke is only ~1 pt above
+its geometry prior (0.588 vs 0.577), so its visual increment is not
+established**; its 600-step run had a blank control but no geometry control.
+The **descriptor/structure head fails specifically on the zero-inflated
+lumen-area dimension** at this data scale (37–405 images), with weak signal on
+the connectivity/persistence dimensions. The real-data idea is partially
+supported for the cf task; the structural regression needs a hurdle/persistence
+target (see `docs/P2_TOPOLOGY_PLAN.md`), not just more steps.
 
 **The auxiliary-supervision half of the idea is not yet demonstrated.** On the
 same cf task, LoRA-only (no aux heads/losses, same data and steps) gets 0.644;
@@ -119,11 +135,12 @@ were trained for 150 steps at 1024 tokens, 3 seeds.
 - The signal is concentrated in **expand** (0.722, stable across seeds);
   translate is ~0.56 (near chance); collapse has only 8 test examples
   (0.38–0.50) and is uninformative.
-- The **structure head does not generalise on MoNuSeg**: topology R² is
-  negative for all seeds (and for the blank control). With 37 training images
-  it overfits the descriptor; the real topology regression needs more data or
-  a different target. This is a clear negative for the structure head on this
-  cohort, in contrast to the synthetic result.
+- The **old five-dimension mean R² is negative on MoNuSeg**, but it is
+  dominated by the zero-inflated `hole_area_frac`. Per-dimension diagnostics
+  (train-mean baseline, skill, Spearman) show weak/near-zero signal on some
+  connectivity dims and a genuine failure on `hole_area_frac`. With 37
+  training images the continuous descriptor still needs more data and a
+  hurdle/persistence target; this is not evidence that all five dims failed.
 
 ### PanNuke
 
@@ -147,9 +164,11 @@ is a lower bound. It is also only ~1 point above the 0.577 box-geometry prior,
 so the visual edge over geometry is small on this split. The blank paired
 delta is positive but the geometry control absorbs most of it.
 
-The structure head again fails to generalise on held-out tissues (topology
-R² −3.76 / −5.84; blank −22 / −36); the 5-type descriptor is not learned across
-the tissue split.
+The old mean topology R² is again negative on held-out tissues (−3.76 / −5.84;
+blank −22 / −36), but the mean is dominated by the zero-inflated lumen-area
+dim; with a train-mean baseline, the non-degenerate dims average +0.13 and
+`h0_sum` reaches R² +0.52 / Spearman 0.71. The 5-type descriptor is not learned
+as a whole, but "all dims fail" is too strong.
 
 ### 2026-10-22 extension: 600 steps and topology-only structure head
 
@@ -161,16 +180,21 @@ for 150 steps with the same topology-only head (3 seeds, checkpoints at 50/100).
 cf was **0.600** (CI [0.563, 0.649]), AUC 0.657, versus 0.588 at 300 steps —
 a +1.2 pt gain with overlapping CIs. Blank 0.547; paired real−blank +5.3 pt
 (CI [0.5, 10.9]). Per-kind: collapse 0.544 / expand 0.606 / translate 0.631.
-The topology-only structure head still had negative held-out R² (−6.16), driven
-by `hole_area_frac` (−31.2); `h0_sum` was +0.52, other dims near zero.
+The topology-only structure head still had a negative **five-dimension mean**
+R² (−6.16), driven by `hole_area_frac` (−31.2); with a train-mean baseline,
+`h0_sum` was +0.52 (skill +0.59, Spearman 0.71), `n_comp`/`h0_max` had skill
++0.12/+0.11 (Spearman 0.35), and `hole_area_frac` alone had MAE 23× the mean
+predictor. The mean is not a valid summary of this block.
 
 **MoNuSeg topology-only (3 seeds).** Held-out cf 0.600/0.583/0.600 (mean 0.594,
 vs 0.611 with the full descriptor), blank 0.489, expand 0.750, translate 0.524,
 collapse 0.375 (n=8); paired real−blank +15.0/+5.0/+11.7 pt. Train cf collapsed
 to 0.016/0.048/0.004 by step 150. Checkpoints at step 100 gave cf 0.583/0.600/
 0.550 (mean 0.578), no better than the final model, but a less negative
-structure R² for two seeds (−19 vs −45; −19 vs −22). Topology R² remained
-negative, dominated by `hole_area_frac` (−223/−110/−193).
+structure R² for two seeds (−19 vs −45; −19 vs −22). The five-dimension mean
+remained negative, dominated by `hole_area_frac` (−223/−110/−193); the other
+dims were weak/near-zero, so this is a target-definition failure on the
+zero-inflated dim, not a global "structure head failed".
 
 **Conclusion.** Neither longer training nor removing the regional block fixes
 the held-out structure regression; the constraint is data scale and the target

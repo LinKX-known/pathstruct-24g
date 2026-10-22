@@ -29,6 +29,11 @@ class TrainConfig:
     # hole_count, hole_area_frac, h0_max, h0_sum). The 3x3 regional block was
     # consistently unlearned on real data and diluted the topology loss.
     structure_dims: int = 0
+    # P2: supervise the structure head on downstream (growth/tissue) examples
+    # too, not only on counterfactual examples. This is what makes topology a
+    # shared representation for the downstream task instead of a side task.
+    structure_on_growth: bool = True
+    lam_structure_growth: float = 0.5
     log_every: int = 10
     # Save an intermediate adapter every N steps (0 = only the final one).
     # The real-data runs are short and the balance between under- and
@@ -104,13 +109,16 @@ def collate_aux(example: Dict[str, Any]):
     """Tensors for the two auxiliary heads.
 
     The mask features carry the *actual* edit centre and radius, so the
-    counterfactual head knows where the intervention happened. Feeding a
-    constant here would leave the head unable to localise anything.
+    counterfactual head knows where the intervention happened. Downstream
+    (growth/tissue) rows have a descriptor but no ``changed`` label; they only
+    feed the structure head, so ``changed`` defaults to 0 and is ignored.
     """
     import torch
 
+    if "descriptor" not in example:
+        raise KeyError("auxiliary supervision needs a `descriptor` field")
     desc = torch.tensor([example["descriptor"]], dtype=torch.float32)
-    changed = torch.tensor([float(example["changed"])], dtype=torch.float32)
+    changed = torch.tensor([float(example.get("changed", 0.0))], dtype=torch.float32)
     center = example.get("center") or [0.5, 0.5]
     radius = float(example.get("radius") or 0.2)
     kind = example.get("kind", "collapse")
@@ -151,7 +159,7 @@ def run(
     import torch
     from transformers import get_cosine_schedule_with_warmup
 
-    from .heads import build_heads, grid_from_hidden
+    from .heads import build_heads, grid_or_global_mean
     from .model import image_token_id
 
     torch.manual_seed(cfg.seed)
@@ -172,6 +180,9 @@ def run(
     vision_cfg = getattr(base_cfg, "vision_config", None)
     merge_size = int(getattr(vision_cfg, "spatial_merge_size", 2) or 2)
     n_desc = len(cf[0]["descriptor"]) if cf else 0
+    has_growth_desc = any(bool(g.get("descriptor")) for g in growth)
+    if n_desc == 0 and has_growth_desc:
+        n_desc = len(next(g["descriptor"] for g in growth if g.get("descriptor")))
     s_dims = int(cfg.structure_dims or n_desc)
     if s_dims > n_desc:
         raise ValueError(
@@ -179,7 +190,7 @@ def run(
         )
     heads = (
         build_heads(d_model, max(s_dims, 1), hidden=1024).to(device)
-        if (use_aux and cf)
+        if (use_aux and (cf or has_growth_desc))
         else None
     )
 
@@ -196,6 +207,9 @@ def run(
     rng = np.random.default_rng(cfg.seed)
     model.train()
     warned_grid = False
+    warned_grid_failed = False
+    grid_fallbacks = 0
+    grid_failures = 0
 
     history: List[Dict[str, float]] = []
     save_dir = Path(cfg.save_dir)
@@ -205,6 +219,7 @@ def run(
     for step in range(total_steps):
         opt.zero_grad(set_to_none=True)
         logs: Dict[str, float] = {}
+        counts: Dict[str, int] = {}
         used = 0
         did_backward = False
 
@@ -224,11 +239,17 @@ def run(
             # in the left panel does not address the pooled token grid of the
             # whole composite, so do not train the geometry-conditioned heads on
             # it. The language loss is the experiment there.
-            need_aux = (
-                heads is not None
-                and ex.get("task") == "cf"
-                and ex.get("presentation", "box") == "box"
+            is_cf = ex.get("task") == "cf" and ex.get("presentation", "box") == "box"
+            has_descriptor = bool(ex.get("descriptor"))
+            # P2 supervision: train the structure head on downstream examples
+            # that carry a descriptor (computed from the same patch's cell
+            # table), not only on the counterfactual examples. Without this the
+            # topology loss is a side task on a different data distribution.
+            need_structure = heads is not None and (
+                is_cf or (cfg.structure_on_growth and has_descriptor)
             )
+            need_cf = heads is not None and is_cf
+            need_aux = need_structure or need_cf
             out = model(**batch, output_hidden_states=need_aux)
             loss = out.loss / cfg.grad_accum
             logs["lm"] = logs.get("lm", 0.0) + float(out.loss.detach())
@@ -236,16 +257,11 @@ def run(
             if need_aux:
                 hidden = out.hidden_states[-1]
                 vis = batch["input_ids"] == iid
-                grid = grid_from_hidden(
+                grid, grid_status = grid_or_global_mean(
                     hidden, vis, batch.get("image_grid_thw"), merge_size=merge_size
                 )
-                if grid is None:
-                    # Shape mismatch: repeat the global mean into a 3x3 grid so
-                    # the heads have the right interface. This loses the
-                    # localisation the pilot is trying to test, so say so once.
-                    w = vis.unsqueeze(-1).to(hidden.dtype)
-                    pooled = (hidden * w).sum(1) / w.sum(1).clamp(min=1.0)
-                    grid = pooled[0].view(1, 1, -1).expand(3, 3, -1)
+                if grid_status == "fallback":
+                    grid_fallbacks += 1
                     if not warned_grid:
                         print(
                             "[warn] image tokens do not form the expected grid; "
@@ -253,17 +269,34 @@ def run(
                             flush=True,
                         )
                         warned_grid = True
-                desc, changed, feats = (t.to(device) for t in collate_aux(ex))
-                s_pred = heads["structure"](grid)
-                # Topology-only mode drops the 3x3 regional block, which had
-                # negative R^2 on both real cohorts.
-                target = torch.log1p(desc[:, :s_dims].clamp(min=0.0))
-                l_s = smooth_l1(s_pred, target)
-                logit = heads["cf"](grid, feats)
-                l_c = torch.nn.functional.binary_cross_entropy_with_logits(logit, changed)
-                loss = loss + (cfg.lam_structure * l_s + cfg.lam_cf * l_c) / cfg.grad_accum
-                logs["struct"] = logs.get("struct", 0.0) + float(l_s.detach())
-                logs["cf"] = logs.get("cf", 0.0) + float(l_c.detach())
+                elif grid_status == "failed":
+                    grid_failures += 1
+                    if not warned_grid_failed:
+                        print(
+                            "[warn] no image tokens found; auxiliary losses skipped "
+                            "for these batches",
+                            flush=True,
+                        )
+                        warned_grid_failed = True
+
+                if grid is not None:
+                    desc, changed, feats = (t.to(device) for t in collate_aux(ex))
+                    if need_structure and desc.shape[1] >= s_dims:
+                        s_pred = heads["structure"](grid)
+                        # Topology-only mode drops the 3x3 regional block, which
+                        # had negative R^2 on both real cohorts.
+                        target = torch.log1p(desc[:, :s_dims].clamp(min=0.0))
+                        l_s = smooth_l1(s_pred, target)
+                        lam_s = cfg.lam_structure if is_cf else cfg.lam_structure_growth
+                        loss = loss + lam_s * l_s / cfg.grad_accum
+                        logs["struct"] = logs.get("struct", 0.0) + float(l_s.detach())
+                        counts["struct"] = counts.get("struct", 0) + 1
+                    if need_cf:
+                        logit = heads["cf"](grid, feats)
+                        l_c = torch.nn.functional.binary_cross_entropy_with_logits(logit, changed)
+                        loss = loss + cfg.lam_cf * l_c / cfg.grad_accum
+                        logs["cf"] = logs.get("cf", 0.0) + float(l_c.detach())
+                        counts["cf"] = counts.get("cf", 0) + 1
 
             loss.backward()
             did_backward = True
@@ -275,7 +308,13 @@ def run(
             continue
 
         n_used = max(used, 1)
-        logs = {k: v / n_used for k, v in logs.items()}
+        # ``lm`` is present for every micro-batch; the auxiliary losses are
+        # present only for batches where the head was actually applied. Divide
+        # each by its own count instead of diluting it by all batches.
+        logs = {
+            k: v / (n_used if k == "lm" else max(counts.get(k, 0), 1))
+            for k, v in logs.items()
+        }
         torch.nn.utils.clip_grad_norm_(params, cfg.max_grad_norm)
         opt.step()
         sched.step()
@@ -309,4 +348,16 @@ def run(
     model.save_pretrained(save_dir)
     if heads is not None:
         torch.save(heads.state_dict(), save_dir / "aux_heads.pt")
-    return {"history": history, "save_dir": str(save_dir)}
+    if grid_fallbacks or grid_failures:
+        print(
+            f"[warn] auxiliary geometry: {grid_fallbacks} fallback batches, "
+            f"{grid_failures} batches without image tokens; "
+            "see the per-run diagnostics before trusting localisation",
+            flush=True,
+        )
+    return {
+        "history": history,
+        "save_dir": str(save_dir),
+        "grid_fallbacks": grid_fallbacks,
+        "grid_failures": grid_failures,
+    }

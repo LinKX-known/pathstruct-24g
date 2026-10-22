@@ -1,15 +1,20 @@
 #!/usr/bin/env python
 """Patient/tissue-grouped bootstrap for the trained-head evaluation.
 
-Consumes the JSON arrays written by ``scripts/eval_heads.py --out`` (real and,
-optionally, blank-box control) and reports:
+Consumes the JSON arrays written by ``scripts/eval/eval_heads.py --out`` (real
+and, optionally, blank-box control) and reports:
 
 * balanced accuracy / AUC with a 95% group bootstrap;
 * real-minus-blank paired difference (same ex_id);
-* structure-head topology R^2 with a group bootstrap.
+* a robust structure summary with group CIs.  The old headline ``mean R^2``
+  over five dimensions is still printed as ``r2_mean_all`` for continuity, but
+  it is dominated by zero-inflated dimensions such as ``hole_area_frac``.
+  Prefer ``r2_median_all``, ``r2_mean_nondegenerate``, ``skill_mean`` and
+  ``spearman_mean``; see ``pilot.structure_eval``.
 
-    python scripts/bootstrap_heads.py \
-        --real out/heads_real_s0.json --blank out/heads_blank_s0.json
+    python scripts/eval/bootstrap_heads.py \
+        --real out/heads_real_s0.json --blank out/heads_blank_s0.json \
+        --train-data data/synth/cf_train_bal.jsonl
 """
 
 from __future__ import annotations
@@ -45,28 +50,37 @@ def auc(y, score):
     return float(roc_auc_score(y, np.asarray(score, dtype=float)))
 
 
-def r2_topology(rows):
+def _arrays(rows):
     true = np.asarray([r["descriptor"] for r in rows], dtype=float)
     pred = np.asarray([r["s_pred"] for r in rows], dtype=float)
     d = min(pred.shape[1], true.shape[1])
-    target = np.log1p(np.clip(true[:, :d], 0, None))
-    pred = pred[:, :d]
-    out = []
-    for j in range(d):
-        t = target[:, j]
-        p = pred[:, j]
-        ss_res = float(np.sum((p - t) ** 2))
-        ss_tot = float(np.sum((t - t.mean()) ** 2))
-        out.append(1.0 - ss_res / ss_tot if ss_tot > 0 else float("nan"))
-    return float(np.nanmean(out[:5])), float(np.nanmean(out))
+    return true[:, :d], pred[:, :d], d
 
 
-def group_bootstrap(rows, n_boot=5000, seed=0):
+def structure_summary(rows, train_mean=None):
+    from pilot.structure_eval import log1p_target, per_dim_diagnostics, summary
+
+    true, pred, d = _arrays(rows)
+    diags = per_dim_diagnostics(
+        log1p_target(true, d), pred, train_mean=train_mean
+    )
+    return summary(diags)
+
+
+def _nan_ci(values, name):
+    a = np.asarray([v.get(name, np.nan) for v in values], dtype=float)
+    if not np.isfinite(a).any():
+        return [float("nan"), float("nan")]
+    return [float(v) for v in np.nanpercentile(a, [2.5, 97.5])]
+
+
+def group_bootstrap(rows, train_mean=None, n_boot=5000, seed=0):
     groups = np.asarray([r["patient_id"] for r in rows])
     uniq = np.unique(groups)
     members = {g: np.flatnonzero(groups == g) for g in uniq}
     rng = np.random.default_rng(seed)
-    bal, aucs, topo = [], [], []
+    bal, aucs = [], []
+    struct = []
     for _ in range(n_boot):
         pick = rng.choice(uniq, len(uniq), replace=True)
         idx = np.concatenate([members[g] for g in pick])
@@ -76,7 +90,18 @@ def group_bootstrap(rows, n_boot=5000, seed=0):
         logit = [r["logit"] for r in sub]
         bal.append(balanced_acc(y, pred))
         aucs.append(auc(y, logit))
-        topo.append(r2_topology(sub)[0])
+        struct.append(structure_summary(sub, train_mean=train_mean))
+    point = structure_summary(rows, train_mean=train_mean)
+    ci_keys = (
+        "r2_mean_all",
+        "r2_median_all",
+        "r2_mean_nondegenerate",
+        "skill_mean",
+        "spearman_mean",
+        "spearman_mean_nondegenerate",
+        "mae_ratio_median",
+        "presence_auc_mean",
+    )
     return {
         "n": len(rows),
         "n_groups": int(len(uniq)),
@@ -86,8 +111,8 @@ def group_bootstrap(rows, n_boot=5000, seed=0):
         "balanced_ci": np.nanpercentile(bal, [2.5, 97.5]).tolist(),
         "auc": auc([r["changed"] for r in rows], [r["logit"] for r in rows]),
         "auc_ci": np.nanpercentile(aucs, [2.5, 97.5]).tolist(),
-        "r2_topology": r2_topology(rows)[0],
-        "r2_topology_ci": np.nanpercentile(topo, [2.5, 97.5]).tolist(),
+        "structure": point,
+        "structure_ci": {k: _nan_ci(struct, k) for k in ci_keys},
     }
 
 
@@ -119,15 +144,44 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--real", required=True)
     ap.add_argument("--blank", default=None)
+    ap.add_argument("--train-data", dest="train_data", default=None)
     ap.add_argument("--n-boot", dest="n_boot", type=int, default=5000)
+    ap.add_argument("--out", default=None)
     args = ap.parse_args()
 
+    import sys
+
+    sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
+    from pilot.data import read_jsonl
+    from pilot.structure_eval import log1p_target
+
+    train_mean = None
+    if args.train_data:
+        train = read_jsonl(args.train_data)
+        if not train:
+            raise SystemExit("empty training data")
+        # The prediction width is defined by the first real row's s_pred.
+        first = read_rows(args.real)[0]
+        d = len(first["s_pred"])
+        train_mean = np.nanmean(log1p_target([r["descriptor"] for r in train], d), axis=0)
+
     real = read_rows(args.real)
-    print("real:", json.dumps(group_bootstrap(real, args.n_boot), indent=2))
+    result = {
+        "real": group_bootstrap(real, train_mean, args.n_boot),
+    }
+    print("real:", json.dumps(result["real"], indent=2, default=float))
     if args.blank:
         blank = read_rows(args.blank)
-        print("blank:", json.dumps(group_bootstrap(blank, args.n_boot), indent=2))
-        print("real-blank paired:", json.dumps(paired_bootstrap(real, blank, args.n_boot), indent=2))
+        result["blank"] = group_bootstrap(blank, train_mean, args.n_boot)
+        result["real_minus_blank"] = paired_bootstrap(real, blank, args.n_boot)
+        print("blank:", json.dumps(result["blank"], indent=2, default=float))
+        print(
+            "real-blank paired:",
+            json.dumps(result["real_minus_blank"], indent=2, default=float),
+        )
+    if args.out:
+        Path(args.out).write_text(json.dumps(result, indent=2, default=float), encoding="utf-8")
+        print(f"wrote {args.out}")
     return 0
 
 

@@ -42,9 +42,9 @@ if HAS_TORCH:
         """Reshape image-token hidden states into ``(gh, gw, d)``.
 
         Returns ``None`` when the shapes do not line up (wrong token id, a
-        batch larger than one, an unexpected merge size). Callers fall back to
-        a repeated global mean so training still runs, but the failure is
-        visible in the logs.
+        batch larger than one, an unexpected merge size). Callers should use
+        :func:`grid_or_global_mean` when they need a fallback, so the fallback
+        is counted instead of being silent.
         """
         if hidden is None or hidden.dim() != 3 or image_mask is None or grid_thw is None:
             return None
@@ -62,6 +62,28 @@ if HAS_TORCH:
         if t > 1:
             tokens = tokens.reshape(t, gh, gw, -1).mean(0)
         return tokens.reshape(gh, gw, -1)
+
+    def grid_or_global_mean(hidden, image_mask, grid_thw, merge_size: int = 2):
+        """Grid if the token layout is known, otherwise a repeated global mean.
+
+        Returns ``(grid, status)`` with status ``"grid"``, ``"fallback"`` or
+        ``"failed"``.  The fallback keeps training/evaluation running when
+        ``image_grid_thw`` is missing, but it destroys the localisation the
+        heads depend on, so every caller must count and report it.
+        """
+        grid = grid_from_hidden(hidden, image_mask, grid_thw, merge_size)
+        if grid is not None:
+            return grid, "grid"
+        if hidden is None or hidden.dim() != 3 or image_mask is None:
+            return None, "failed"
+        if hidden.shape[0] != 1:
+            return None, "failed"
+        vis = image_mask[0].bool()
+        if not bool(vis.any()):
+            return None, "failed"
+        w = vis.to(hidden.dtype).unsqueeze(0).unsqueeze(-1)  # (1, seq, 1)
+        pooled = (hidden * w).sum(1) / w.sum(1).clamp(min=1.0)
+        return pooled[0].view(1, 1, -1).expand(3, 3, -1), "fallback"
 
     class StructureHead(nn.Module):
         """Predict the structural descriptor from a spatial 3x3 pooling."""
@@ -107,12 +129,34 @@ if HAS_TORCH:
         def forward(self, grid, mask_feats):
             if grid is None:
                 raise ValueError("CounterfactualHead needs an image-token grid")
+            if mask_feats.ndim != 2 or mask_feats.shape[1] != MASK_DIM:
+                raise ValueError(
+                    f"mask_feats must be (1, {MASK_DIM}); got {tuple(mask_feats.shape)}"
+                )
+            if not bool(torch.isfinite(mask_feats).all()):
+                raise ValueError("mask_feats contains NaN/Inf")
             grid = grid.float()
             mask_feats = mask_feats.float()
             gh, gw, d = grid.shape
-            cx = mask_feats[0, 0]
-            cy = mask_feats[0, 1]
-            radius = mask_feats[0, 2].clamp(min=1e-4)
+            cx, cy = float(mask_feats[0, 0]), float(mask_feats[0, 1])
+            radius_raw = float(mask_feats[0, 2])
+            # The head pools the token grid in normalised [0, 1] coordinates.
+            # A pixel-space centre (e.g. 512, 512) or a pixel-space radius
+            # (e.g. 60) would silently select one token or the whole grid, so
+            # fail loudly instead of pretending the geometry is meaningful.
+            if not (0.0 <= cx <= 1.0 and 0.0 <= cy <= 1.0):
+                raise ValueError(
+                    "mask centre must be normalised to [0, 1]; "
+                    f"got ({cx:.3f}, {cy:.3f}). Did you pass pixel coordinates?"
+                )
+            if not (0.0 < radius_raw <= 2.0):
+                raise ValueError(
+                    "mask radius must be normalised to (0, 2]; "
+                    f"got {radius_raw:.3f}. Did you pass a pixel radius?"
+                )
+            if float(mask_feats[0, 3:5].abs().max()) > 2.0:
+                raise ValueError("mask translation vector must be normalised")
+            radius = torch.as_tensor(radius_raw, device=grid.device, dtype=grid.dtype).clamp(min=1e-4)
             ys = (torch.arange(gh, device=grid.device, dtype=grid.dtype) + 0.5) / gh
             xs = (torch.arange(gw, device=grid.device, dtype=grid.dtype) + 0.5) / gw
             dist2 = ((xs[None, :] - cx) / radius) ** 2 + ((ys[:, None] - cy) / radius) ** 2

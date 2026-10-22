@@ -90,7 +90,12 @@ def cmd_build(args) -> int:
                 + ", ".join(labels)
                 + ". Answer with one word."
             )
-    growth = build_growth_examples(manifest, question=question or GROWTH_QUESTION)
+    growth = build_growth_examples(
+        manifest,
+        question=question or GROWTH_QUESTION,
+        cells_dir=args.cells,
+        with_descriptor=not args.no_growth_descriptors,
+    )
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     if args.presentation == "before_after" and args.no_annotate:
@@ -186,6 +191,8 @@ def cmd_train(args) -> int:
         grad_accum=args.grad_accum,
         lr=args.lr,
         lam_structure=args.lam_structure,
+        lam_structure_growth=args.lam_structure_growth,
+        structure_on_growth=args.structure_on_growth,
         lam_cf=args.lam_cf,
         save_dir=args.out,
         log_every=args.log_every,
@@ -390,6 +397,12 @@ def build_parser() -> argparse.ArgumentParser:
     b.add_argument("--no-annotate", dest="no_annotate", action="store_true")
     b.add_argument("--no-balance-by-kind", dest="no_balance_by_kind", action="store_true")
     b.add_argument(
+        "--no-growth-descriptors",
+        dest="no_growth_descriptors",
+        action="store_true",
+        help="do not attach a topology descriptor to downstream (growth/tissue) rows",
+    )
+    b.add_argument(
         "--min-affected",
         dest="min_affected",
         type=int,
@@ -443,6 +456,19 @@ def build_parser() -> argparse.ArgumentParser:
     tr.add_argument("--lr", type=float, default=1e-4)
     tr.add_argument("--lam-structure", dest="lam_structure", type=float, default=0.5)
     tr.add_argument("--lam-cf", dest="lam_cf", type=float, default=0.5)
+    tr.add_argument(
+        "--lam-structure-growth",
+        dest="lam_structure_growth",
+        type=float,
+        default=0.5,
+        help="weight of the structure loss on downstream examples with a descriptor",
+    )
+    tr.add_argument(
+        "--no-structure-on-growth",
+        dest="structure_on_growth",
+        action="store_false",
+        help="only train the structure head on counterfactual examples",
+    )
     tr.add_argument("--no-aux", dest="no_aux", action="store_true")
     tr.add_argument("--out", default="out/pilot")
     tr.add_argument("--log-every", dest="log_every", type=int, default=10)

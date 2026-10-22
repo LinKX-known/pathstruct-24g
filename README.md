@@ -253,6 +253,45 @@ region coordinates back into text. A text-only model can then solve part of the
 task (0.69 balanced accuracy before the fix), so do not use it for a headline
 counterfactual result.
 
+## Topology diagnostics and P2
+
+The old "five-dimension mean R²" headline is dominated by the zero-inflated
+`hole_area_frac`; it is not a valid summary of the structure head. Use the
+per-dimension diagnostics (train-mean baseline, skill, log-MAE, Spearman,
+presence AUC) instead:
+
+```bash
+python scripts/eval/diagnose_structure.py \
+  --pred out/heads_topo_real_s0.json \
+  --train-data data/real/monuseg_train/cf_train_bal.jsonl --dims 5
+```
+
+Two controls/next steps are implemented:
+
+```bash
+# same image, box moved; label recomputed from the cell table
+python scripts/controls/make_wrongbox_control.py \
+  --data data/real/monuseg_test/cf_bal.jsonl \
+  --cells data/real/monuseg/cells \
+  --out data/real/monuseg_test/wrongbox \
+  --jsonl data/real/monuseg_test/cf_bal_wrongbox.jsonl
+python scripts/eval/analyze_wrongbox.py \
+  --real out/heads_topo_real_s0.json \
+  --wrongbox out/heads_wrongbox_topo_real_s0.json
+
+# DHMC slide-level growth-pattern data -> patches
+python scripts/data/import_dhmc.py --metadata MetaData.csv --wsi-dir /data/DHMC \
+  --out data/real/dhmc --patch-size 512 --patches-per-slide 32
+
+# aggregate patch predictions to a slide answer
+python scripts/eval/aggregate_slide_predictions.py \
+  --pred out/dhmc_aux_eval.json --out out/dhmc_aux_slide.json
+```
+
+The full reasoning, literature anchors (TopoSlide, PMIL, TG-HEM, GeoTop,
+GraPHFormer) and the P2 design are in
+[`docs/P2_TOPOLOGY_PLAN.md`](docs/P2_TOPOLOGY_PLAN.md).
+
 The default synthetic cohort has 12 ROIs/class. That validates plumbing, not
 learning; use `--per-class 24` or more for a learnability check, and replace it
 with real data as soon as the commands run end to end:

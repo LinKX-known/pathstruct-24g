@@ -135,23 +135,74 @@ def read_manifest(path: str | Path) -> pd.DataFrame:
 
 
 # --------------------------------------------------------------------------- #
-def build_growth_examples(manifest: pd.DataFrame, question: str = GROWTH_QUESTION) -> List[Dict[str, Any]]:
+def build_growth_examples(
+    manifest: pd.DataFrame,
+    question: str = GROWTH_QUESTION,
+    cells_dir: str | Path | None = None,
+    with_descriptor: bool = False,
+    min_cells: int = 8,
+) -> List[Dict[str, Any]]:
+    """Build downstream examples, optionally with a topology descriptor.
+
+    P2 needs the structure head to be supervised on the *same* patches as the
+    downstream task, not only on counterfactual examples from another cohort.
+    Passing ``cells_dir`` + ``with_descriptor=True`` attaches the same
+    descriptor used by the counterfactual rows, computed in the image frame so
+    it lines up with the structure head's 3x3 pooling.
+    """
+    records = manifest.to_dict(orient="records")
+    descriptors: Dict[str, Dict[str, Any]] = {}
+    if with_descriptor and cells_dir is not None:
+        from PIL import Image
+
+        loaded = [load_cells_dir(cells_dir, str(r["roi_id"])) for r in records]
+        indexed_types, vocab = global_type_index(
+            [item[1] if item is not None else None for item in loaded]
+        )
+        n_types = max(len(vocab), 1)
+        for rec, item, types in zip(records, loaded, indexed_types):
+            if item is None:
+                continue
+            points, _ = item
+            if len(points) < min_cells:
+                continue
+            try:
+                with Image.open(rec["image_path"]) as im:
+                    width, height = im.size
+            except Exception:
+                continue
+            desc = describe(
+                points,
+                types,
+                n_types=n_types,
+                frame=((0.0, 0.0), (float(width), float(height))),
+            )
+            values = [float(v) if np.isfinite(v) else 0.0 for v in desc.values]
+            descriptors[str(rec["roi_id"])] = {
+                "descriptor": values,
+                "n_cells": int(len(points)),
+                "descriptor_names": list(desc.names),
+            }
+
     rows = []
-    for r in manifest.to_dict(orient="records"):
+    for r in records:
         label = str(r.get("label", "")).strip()
         if not label or not r.get("image_path"):
             continue
-        rows.append(
-            {
-                "task": "growth",
-                "ex_id": f"growth__{r['roi_id']}",
-                "roi_id": r["roi_id"],
-                "patient_id": r.get("patient_id", "") or r["roi_id"],
-                "image": r["image_path"],
-                "question": question,
-                "answer": label,
-            }
-        )
+        ex = {
+            "task": "growth",
+            "ex_id": f"growth__{r['roi_id']}",
+            "roi_id": r["roi_id"],
+            "patient_id": r.get("patient_id", "") or r["roi_id"],
+            "wsi_id": r.get("wsi_id", ""),
+            "image": r["image_path"],
+            "question": question,
+            "answer": label,
+        }
+        extra = descriptors.get(str(r["roi_id"]))
+        if extra:
+            ex.update(extra)
+        rows.append(ex)
     return rows
 
 
@@ -384,6 +435,7 @@ def build_cf_examples(
                     "ex_id": ex_id,
                     "roi_id": row["roi_id"],
                     "patient_id": row.get("patient_id", "") or row["roi_id"],
+                    "wsi_id": row.get("wsi_id", ""),
                     "image": image_path,
                     "source_image": row["image_path"],
                     "image_size": image_size,

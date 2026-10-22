@@ -13,9 +13,9 @@
 
 - 合成数据：简单版 LM 的 0.674 是**空框 + 先验捷径**；严格非空、kind/label 平衡后，384 px 的 LM 只有 0.500，1024 px 只有 0.534。训练后的**反事实头**在严格 384 px 上 0.640（blank 0.509）；**结构头**在合成数据上 topology R² 0.315/0.411。
 - 真实 H&E（MoNuSeg）：反事实头 3 个 seed 为 0.583/0.600/0.650（mean **0.611**），blank 0.500，box-geometry 0.467；**expand 类稳定 0.722**；结构头 topology R² **为负**。
-- 真实 H&E（PanNuke）：反事实头 2 个 seed 为 0.595/0.582（mean **0.588**），blank 0.530，box-geometry 0.577；但训练 loss 停在 0.5–0.8（underfit，1.3 epochs），0.588 是下界；结构头 topology R² **仍为负**。
+- 真实 H&E（PanNuke）：反事实头 2 个 seed 为 0.595/0.582（mean **0.588**），blank 0.530，但 box-geometry 0.577——**只高约 1 pt，视觉增量未证实**；训练 loss 停在 0.5–0.8（underfit，1.3 epochs），0.588 是下界；结构头旧五维平均 R² 为负（由 `hole_area_frac` 驱动；非退化维 mean R² +0.13、`h0_sum` R² +0.52）。
 - **扩展到 600 步 + topology-only（2026-10-22）**：PanNuke cf **0.600**（blank 0.547，real−blank +5.3 pt，CI [0.5, 10.9]），仅比 300 步高 1.2 pt；MoNuSeg 3 seeds mean **0.594**（full descriptor 0.611），blank 0.489，expand 0.750。两组的结构 topo R² 仍为负；去掉 3×3 regional block 没有修复结构回归。
-- 因此：**反事实头在真实 H&E 上有小幅但真实的视觉信号**（尤其 expand）；**结构回归头没有从合成迁移到真实数据，加长训练和去掉 regional block 都没有解决**；P2 下游迁移和 LM yes/no 读出仍未证明。
+- 因此：**MoNuSeg 上反事实头有明确的小幅视觉信号**（0.611 vs geometry 0.467；expand 0.722）；**PanNuke 的视觉增量未证实**（0.588 vs geometry 0.577，只差 1 pt；600 步只有 blank，没有 geometry 对照）。expand 在三个 seed 上稳定（0.72–0.75），但仍要警惕它是较容易的编辑类型，不能单独当作“模型看懂了拓扑”的证据。**结构头在连通性/持久性维（`h0_sum`、`n_comp`、`h0_max`）上有弱但可测的信号，但在零膨胀的 `hole_area_frac` 维上没有学会；旧五维平均 R² 被这一维支配，不能作为“结构头整体失败”的证据**；P2 下游迁移和 LM yes/no 读出仍未证明。
 
 ---
 
@@ -176,7 +176,7 @@ Held-out（620 cf，310/310；4 个完全留出组织）：
 | structure topology R² | −6.16 [−332.2, −3.02] | −3.76 / −5.84 |
 
 - **延长到 600 步只带来 +1.2 pt（0.588 → 0.600），bootstrap CI 重叠；real−blank 边际也没有扩大（+5.3 vs +8.1/+3.9）。** 训练 loss 明显下降但 held-out 基本没动，说明瓶颈不只是 underfitting。
-- 结构头：`--structure-dims 5` 没有把 R² 变正；均值仍被 `hole_area_frac` 的 **−31.18** 支配。逐维：`n_comp` −0.024、`hole_count` +0.007、`hole_area_frac` −31.18、`h0_max` −0.106、**`h0_sum` +0.52**。即个别维度可学，但整体不可用。
+- 结构头：`--structure-dims 5` 的**旧五维平均 R²** 仍被 `hole_area_frac` 的 **−31.18** 支配。用训练集均值做常量基线重算后：`hole_area_frac` 的均值基线 R² 只有 −0.019，模型 −31.18，MAE 是均值预测的 23 倍；而 `h0_sum` 的 R² **+0.52**、skill +0.59、Spearman **0.71**、MAE/均值 0.60，`n_comp` / `h0_max` 的 skill 也各有 +0.12/+0.11、Spearman 0.35。**结论应改为：head 在 `h0_sum`/`n_comp`/`h0_max` 上有弱信号，在 zero-inflated 的 `hole_area_frac` 上失败；五维平均 R² 不是有效汇总。** 逐维：`n_comp` −0.024、`hole_count` +0.007、`hole_area_frac` −31.18、`h0_max` −0.106、`h0_sum` +0.52。
 - 注意：这一轮同时改了步数和结构头目标，cf 对比存在混杂；cf 头结构本身未变，且 600 步的训练 cf 明显更低，因此“多训没有换来 held-out 提升”这个结论是可靠的。
 
 #### 3.4.2 MoNuSeg 150 步 topology-only（3 seeds，含早停）
@@ -229,29 +229,31 @@ Held-out（60 cf；14 患者；final 150 步）：
 ### 成立/有证据
 
 1. **数据管线可跑通**：真实 H&E → 专家核 mask → cell table → topology → cf labels → LoRA + heads → 留出评估。
-2. **反事实任务在真实 H&E 上有一致的、小幅的视觉信号**：MoNuSeg real−blank +11 pt，PanNuke +8.1/+3.9 pt；MoNuSeg expand 0.722；box geometry 不能解释 MoNuSeg 的 0.611（geometry 0.467）。
+2. **MoNuSeg 上反事实任务有明确的小幅视觉信号**：cf 0.611 vs blank 0.500 vs box-geometry 0.467；real−blank +11 pt；expand 0.722。**PanNuke 只证明了 real−blank（+8.1/+3.9 pt），没有证明超过 geometry**（0.588 vs 0.577，只差 1 pt）；600 步 run 只有 blank 0.547，没有 geometry 对照。因此不能把 PanNuke 写成“有视觉信号”。
 3. **训练后的反事实头可以学到东西**：严格 384 合成 0.640（blank 0.509）；MoNuSeg mean 0.611；PanNuke mean 0.588（underfit）。
 4. **控制实验有效**：text-only、blank、geometry、empty-box 四个对照抓到了真实的设计 bug 和混淆。
 
 ### 未成立/未证明
 
 1. **稳健超过 0.65**：MoNuSeg 3 seeds 只有 seed 2 到 0.650；mean 0.611；PanNuke mean 0.588；600 步 topo-only 为 0.600。CI 宽，样本小。
-2. **结构描述子回归在真实 H&E 上泛化**：MoNuSeg 和 PanNuke 的 topology R² 都是负的；合成上的 0.315/0.411 没有复现。`--structure-dims 5` 去掉 regional block 后仍为负（PanNuke −6.16，MoNuSeg −44.8/−22.1/−38.7），且由 `hole_area_frac` 主导。
-3. **辅助监督的下游迁移**：P2 合成到天花板；真实下游还没跑；同任务 aux 只 +3.0 pt 且 CI 跨 0。
-4. **LM 的 yes/no 读出**：严格 384/1024 的 LM 只有 0.500/0.534；模块能学的，LM 生成不出来。
-5. **临床/病理结论**：数据规模小、MoNuSeg test 14 患者、PanNuke 4 个 hold-out 组织；不能做诊断声明。
-6. **加长训练或去掉 3×3 regional block 能修复主要缺口**：PanNuke 300→600 步只 +1.2 pt（CI 重叠），结构 R² 仍负；方向应转向数据规模与目标定义。
+2. **PanNuke 的视觉增量（超过 box geometry）**：300 步 cf 0.588 vs geometry 0.577；600 步 run 没有 geometry 对照，只有 blank 0.547。real−blank 为正不等于“用了局部结构”。
+3. **结构描述子回归在真实 H&E 上整体泛化**：用旧五维平均 R² 看，MoNuSeg 和 PanNuke 都是负的（PanNuke −6.16，MoNuSeg −44.8/−22.1/−38.7），合成上的 0.315/0.411 没有复现。**但该均值由零膨胀、方差极小的 `hole_area_frac` 单维支配**；用训练均值基线重算后，PanNuke 非退化维 mean R² +0.13、全维/非退化 Spearman 0.30/0.47（`h0_sum` R² +0.52、ρ 0.71），MoNuSeg 非退化维 mean R² −0.11/−0.04/−0.03、非退化维 Spearman 0.33–0.47（全维均值 0.15–0.23，被 lumen 维拖低）。正确表述是：**head 在部分 topology 维上有弱信号，在 `hole_area_frac` 上失败；不能再说“结构头完全失败”。**
+4. **辅助监督的下游迁移**：P2 合成到天花板；真实下游还没跑；同任务 aux 只 +3.0 pt 且 CI 跨 0。
+5. **LM 的 yes/no 读出**：严格 384/1024 的 LM 只有 0.500/0.534。但训练 cf loss 能降到 0.004–0.048（训练集已记住），同样的表征喂给头能到 0.61——所以这是 **226 条训练样本不足以泛化**，不是“LM 读不出表征”。下一步应加数据/加约束，而不是先改 LM 架构。
+6. **临床/病理结论**：数据规模小、MoNuSeg test 14 患者、PanNuke 4 个 hold-out 组织；不能做诊断声明。
+7. **加长训练或去掉 3×3 regional block 能修复主要缺口**：PanNuke 300→600 步只 +1.2 pt（CI 重叠），结构 R² 仍负（且该负值主要由 `hole_area_frac` 驱动）；方向应转向数据规模与目标定义。
 
 ---
 
 ## 5. 下一步（按优先级）
 
-1. **扩真实数据/重定义任务**：PanNuke 600 步已试，收益仅 +1.2 pt；下一步增加 patch/患者数，并重做 cf 任务难度（translate/collapse 尤其弱）。所有结果报告 patient/tissue 级 CI。
-2. **重写结构目标**：regional block 已证明不是主因；针对 `hole_area_frac` 的数值不稳定（大量 0 / 尖峰）改用 clip/rank/分位数或分解目标，并报告逐维 R²，而不是只看 5 维均值。
-3. **提高局部有效分辨率**：local crop / 更高 tokens；translate/collapse 是弱项；当前 full-ROI 1024 仍可能不够。
-4. **P2 用真实下游标签**：tissue/growth + patch-level split；LM 读出另测。
-5. **保留四个对照**：text-only、blank、geometry、empty-box；先在真实数据上跑，再谈 0.65。
-6. **更强的呈现方式**：代码已有 `--presentation before_after`；它主要解决 LM 的心算模拟，不替代真实结构头。
+1. **先跑错框对照（已有脚本/数据）**：`data/real/monuseg_test/cf_bal_wrongbox.jsonl` 已生成 50 条“挪框后真值 no”样本；用现有 topo adapter 跑 `eval_heads.py`，再跑 `analyze_wrongbox.py`，看 `wrongbox_yes_rate`（捷径率）和 `flip_no_rate`（正确翻 no 的比例）。这比再加一个训练 seed 更能判断 cf 头的 0.60 是不是在看局部。
+2. **重写结构目标**：regional block 已证明不是主因；对零膨胀的 `hole_area_frac`/H1 用 **hurdle 分解**（presence BCE + 正样本 Huber）或 TopoSlide 式 **持久性直方图 + CDF + 分零/非零 loss**；报告 presence AUC、正样本 MAE/Spearman，而不是只看五维平均 R²。
+3. **P2 用真实下游标签**：DHMC 生长模式（143 WSI，5 类）patch 采样 + 多数投票/MIL；先跑 A0（no-aux）vs A1（structure-on-growth），目标方向性 +2 pt；注意 143 张 slide 对 2 pt 功效不足，需合并罕见类或加外部数据。详见 `docs/P2_TOPOLOGY_PLAN.md`。
+4. **扩真实数据/重定义任务**：PanNuke 600 步已试，收益仅 +1.2 pt；下一步增加 patch/患者数，并重做 cf 任务难度（translate/collapse 尤其弱）。所有结果报告 patient/tissue 级 CI。
+5. **提高局部有效分辨率**：local crop / 更高 tokens；translate/collapse 是弱项；当前 full-ROI 1024 仍可能不够。
+6. **保留并扩展对照**：text-only、blank、geometry、empty-box、**wrong-box**；先在真实数据上跑，再谈 0.65。
+7. **更强的呈现方式**：代码已有 `--presentation before_after`；它主要解决 LM 的心算模拟，不替代真实结构头。
 
 ---
 
@@ -468,7 +470,7 @@ python scripts/eval/bootstrap_heads.py --real out/heads_real_s0.json \
 - blank：0.547，CI [0.529, 0.564]；AUC 0.579，CI [0.540, 0.617]。
 - real−blank 配对：**+5.3 pt**，CI [0.5, 10.9]；n=620，4 组织。
 - per-kind：collapse 0.544（n=160）/ expand 0.606（n=216）/ translate 0.631（n=244）。
-- structure topology R²：−6.16，CI [−332.2, −3.02]；逐维 n_comp −0.024 / hole_count +0.007 / hole_area_frac −31.183 / h0_max −0.106 / h0_sum +0.52。
+- structure topology R²：−6.16，CI [−332.2, −3.02]；逐维 n_comp −0.024 / hole_count +0.007 / hole_area_frac −31.183 / h0_max −0.106 / h0_sum +0.52。注：−6.16 是五维无权重平均，主要由 `hole_area_frac` 驱动；用训练均值基线重算后，非退化维 mean R² +0.13、`h0_sum` R² +0.52、Spearman 0.71。详见 §3.4.1。
 - 对照 300 步 baseline（2 seeds mean）：cf 0.588；AUC 0.636；blank 0.530；paired +8.1/+3.9；topo R² −3.76/−5.84。
 
 **MoNuSeg 150 步 topology-only（3 seeds）**
@@ -561,6 +563,82 @@ done
 
 ```bash
 python -m pytest tests/ -q
-# 23 passed
+# 49 passed (2026-10-22, after metric/wrong-box/P2 scaffolding)
 ```
 
+
+---
+
+## 11. P2 执行计划（2026-10-23，有卡后按此执行）
+
+> 本节是对 §3.4/§4 的修正和后续执行约定；完整设计见 `docs/P2_TOPOLOGY_PLAN.md`。
+
+### 11.1 三个判断的最终口径
+
+- **结构头**：旧五维平均 R²（PanNuke −6.16、MoNuSeg −44.8/−22.1/−38.7）被零膨胀、方差极小的 `hole_area_frac` 支配，不能作为“结构头整体失败”的结论。训练均值基线只有 −0.02 到 −0.03；模型在 `hole_area_frac` 上预测均值为负、MAE 是均值预测的 13–23 倍，这一维确实失败。去掉该维后，PanNuke 非退化维 mean R² +0.13、非退化 Spearman 0.47，`h0_sum` R² +0.52 / ρ 0.71 / MAE 0.60×；MoNuSeg 非退化维 Spearman 0.33–0.47。正确结论是：**lumen 面积维失败 + 旧平均 R² 无效；连通性/持久性维有弱但可测的信号。**
+- **PanNuke cf**：0.588 vs box-geometry 0.577，只高 1 pt；600 步只有 blank 0.547、没有 geometry 对照。**视觉增量未证实**，不能写成“有信号”。
+- **LM 读出**：226 条训练样本能把训练 cf loss 压到 0.004–0.048，但留出约 0.5；同样表征喂给头能到 0.61。这是**数据量/泛化问题**，不是“LM 读不出表征”，下一步应加数据/加约束，而不是先改 LM 架构。
+
+### 11.2 代码已就绪（本次新增/修改）
+
+| 文件 | 用途 |
+|---|---|
+| `src/pilot/structure_eval.py` | 逐维 R²、训练均值基线、skill、log-MAE、Spearman、校准、presence AUC/正样本指标 |
+| `scripts/eval/diagnose_structure.py` | 无 GPU 诊断：`heads_*.json` + 训练 JSONL → 逐维表 |
+| `scripts/eval/eval_heads.py` | 加 `--train-data` / `--metrics-out`；统计并打印 skipped/fallback |
+| `scripts/controls/make_wrongbox_control.py` | 同图挪框；用细胞表重算精确标签；默认只保留“挪框后 no” |
+| `scripts/eval/analyze_wrongbox.py` | 配对分析捷径率、正确翻转率、logit drop |
+| `scripts/data/import_dhmc.py` | DHMC metadata 解析 + WSI tiling + 组织比例过滤 |
+| `scripts/eval/aggregate_slide_predictions.py` | patch 预测 → slide 多数投票 + slide-level 指标 |
+| `src/pilot/mil.py` | AttentionMIL + topology 辅助回归/特征融合（协议 B） |
+| `src/pilot/train.py` | 结构头可在 growth 样本上训练；grid fallback 计数；辅助 loss 日志修正 |
+| `pilot build` | growth 样本默认携带 topology descriptor；`--no-growth-descriptors` 可关 |
+
+### 11.3 有卡后的执行顺序
+
+1. **错框对照（先做，不需要训练）**：用现有 MoNuSeg topo adapters 跑 `cf_bal_wrongbox.jsonl`，看 `wrongbox_yes_rate`（捷径率）和 `flip_no_rate`（原 yes→挪框 no 的正确翻转率）。
+2. **指标复算**：对所有现有 `heads_*.json` 用 `--train-data` 重算逐维诊断和 grouped CI；更新 §3.4/§4。
+3. **DHMC 协议 A**：tile → segment → build（growth descriptor）→ A0（`--no-aux`）vs A1（structure-on-growth），5-fold slide-disjoint × 3 seeds；先跑 3 类敏感性分析，再跑 5 类。
+4. **若 A1 无方向性收益或 patch 标签太噪**：切协议 B（AttentionMIL/topology fusion）和/或 topology-text InfoNCE / rationale 监督。
+
+```bash
+# 第 1 步：错框对照（用现有 MoNuSeg adapter）
+python scripts/eval/eval_heads.py \
+  --adapter out/p1_real_topo_s0 \
+  --data data/real/monuseg_test/cf_bal_wrongbox.jsonl \
+  --train-data data/real/monuseg_train/cf_train_bal.jsonl \
+  --out out/heads_wrongbox_topo_real_s0.json \
+  --metrics-out out/metrics_wrongbox_topo_s0.json
+python scripts/eval/analyze_wrongbox.py \
+  --real out/heads_topo_real_s0.json \
+  --wrongbox out/heads_wrongbox_topo_real_s0.json
+
+# 第 2 步：逐维诊断
+python scripts/eval/diagnose_structure.py \
+  --pred out/heads_topo_real_s0.json \
+  --train-data data/real/monuseg_train/cf_train_bal.jsonl --dims 5
+```
+
+### 11.4 DHMC P2 协议
+
+- 公开 DHMC：143 张 20x H&E WSI，**slide-level predominant pattern**，5 类数量 acinar 59 / solid 51 / lepidic 19 / micropapillary 9 / papillary 5；需在 https://bmirds.github.io/LungCancer/ 填表申请，无公开镜像。
+- **协议 A（先跑）**：每 slide 32–64 个 512×512 patch → nuclei 分割 → `pilot build` → A0 vs A1 → `pilot eval` + `aggregate_slide_predictions.py` 多数投票。
+- **协议 B（标签更贴合）**：patch bag + `src/pilot/mil.py` 的 AttentionMIL；可选 topology 融合。
+- **实验 arm**：A0 baseline / A1 structure-aux / A2 structure-fuse / A3 topology-text InfoNCE / A4 topology rationale。
+- **指标**：slide-level balanced accuracy、macro F1、per-class、slide-grouped bootstrap；5-fold 分层、slide-disjoint、3 seeds。
+- **功效警告**：143 张 slide、5 类，2 个点的差异在 slide 级基本不可检测；第一轮把 2 pt 当方向性目标，先做 3 类（lepidic/acinar/solid，n=129），或加 TCGA-LUAD 扩大 n。
+- **结构目标重设计**：对 `hole_area_frac`/H1 用 hurdle（presence BCE + 正样本 Huber）或 TopoSlide 式 H0/H1 持久性直方图 + CDF + 分零/非零 loss；报告 presence AUC、正样本 MAE/Spearman，不再只看五维平均 R²。
+- **必须保留的对照**：text-only、blank、box-geometry、empty-box、**wrong-box**。
+
+### 11.5 待你决定
+
+1. DHMC WSI 是否已有/如何获取；
+2. 分割后端：CellViT++ / Cellpose / classical；
+3. 先 5 类还是先 3 类；
+4. 是否加 TCGA-LUAD 解决功效问题。
+
+### 11.6 参考
+
+- 完整计划：`docs/P2_TOPOLOGY_PLAN.md`
+- 相关代码：TopoSlide <https://github.com/plevritis-lab/TopoSlide>、PMIL <https://github.com/ahmadobeid/PMIL>、TG-HEM <https://github.com/caki35/TGHEM>、GeoTop <https://github.com/MorillaLab/GeoTop>、DHMC <https://bmirds.github.io/LungCancer/>、DeepSlide <https://github.com/BMIRDS/deepslide>。
+- 当前本地分支：`research/topology-diagnostics`（基于 `origin/main`，未 commit/push）；测试 **49 passed**。

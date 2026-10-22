@@ -6,10 +6,10 @@ dist/
 .venv/
 venv/
 
-data/
-out/
-runs/
-work/
+/data/
+/out/
+/runs/
+/work/
 *.npz
 *.npy
 *.pt
