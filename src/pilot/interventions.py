@@ -30,10 +30,44 @@ from .structures import Descriptor, _scales, describe, descriptor_distance, topo
 EDIT_KINDS = ("collapse", "expand", "translate")
 
 ACTION_TEXT = {
-    "collapse": "pulled together toward the centre",
-    "expand": "pushed apart away from the centre",
-    "translate": "shifted sideways",
+    "collapse": "pulled together toward the centre of the region",
+    "expand": "pushed apart away from the centre of the region",
+    "translate": "shifted as a block",
 }
+
+
+def action_text(edit: "Edit", image_size: Optional[Tuple[float, float]] = None) -> str:
+    """Text that fully specifies the edit, including the translation vector.
+
+    The translation direction is part of the input, not the label: a block
+    shifted across a bridge and the same block shifted along it can have
+    different effects. Without the vector the task is not a function of the
+    observation, and a text-only model is at chance.
+    """
+    if edit.kind != "translate":
+        return ACTION_TEXT[edit.kind]
+    vx, vy = edit.vector
+    if image_size is not None:
+        w, h = image_size
+        vx = vx / max(float(w), 1e-9) * 1000.0
+        vy = vy / max(float(h), 1e-9) * 1000.0
+        return f"shifted as a block by ({vx:.1f}, {vy:.1f}) in 0-1000 image coordinates"
+    return f"shifted as a block by ({vx:.2f}, {vy:.2f})"
+
+
+def region_phrase(center: Tuple[float, float], radius: float, image_size=None) -> str:
+    """A region spec in 0-1000 coordinates (the convention used in prompts)."""
+    if image_size is not None:
+        w, h = image_size
+        cx = center[0] / max(float(w), 1e-9) * 1000.0
+        cy = center[1] / max(float(h), 1e-9) * 1000.0
+        r = radius / max(float(w), float(h), 1e-9) * 1000.0
+        return (
+            f"a circle centred at ({cx:.1f}, {cy:.1f}) with radius {r:.1f} "
+            f"in 0-1000 image coordinates"
+        )
+    cx, cy = center
+    return f"a circle centred at ({cx:.2f}, {cy:.2f}) with radius {radius:.2f}"
 
 
 @dataclass
@@ -45,12 +79,12 @@ class Edit:
     vector: Tuple[float, float] = (0.0, 0.0)
     affected: int = 0
 
-    def prompt(self) -> str:
-        cx, cy = self.center
+    def prompt(self, image_size: Optional[Tuple[float, float]] = None) -> str:
+        """A self-contained prompt for this edit (used by diagnostics/tests)."""
         return (
-            f"A dashed circle is drawn at normalised position ({cx:.2f}, {cy:.2f}) "
-            f"with radius {self.radius:.2f}. Inside it, the cells are "
-            f"{ACTION_TEXT[self.kind]}. Does the tissue architecture in the image change? "
+            f"Consider {region_phrase(self.center, self.radius, image_size)}. "
+            f"Inside it, the cells are {action_text(self, image_size)}. "
+            f"Would the number of connected cell groups or enclosed lumina change? "
             f"Answer yes or no."
         )
 
@@ -149,33 +183,95 @@ def sample_interventions(
     n_types: int = 1,
     grid: int = 3,
     balance: bool = True,
+    balance_by_kind: bool = True,
+    min_affected: int = 0,
     max_attempts_factor: int = 40,
     return_points: bool = False,
 ) -> List[Intervention]:
-    """Sample edits, optionally balancing the yes/no label.
+    """Sample edits, balancing the yes/no label *within each edit kind*.
+
+    Overall balance is not enough. If ``collapse`` changes topology 65% of the
+    time while ``expand`` does so 41% of the time, a text-only model can read
+    the edit kind from the prompt and reach ~0.59 balanced accuracy without
+    looking at the image. Alternating yes/no within each kind removes that
+    shortcut; a text-only model is then at 0.5.
 
     Balance matters: an unbalanced set can be solved by always answering the
     majority class, and the model would learn nothing about structure.
+
+    ``min_affected`` rejects edits whose box contains fewer than that many
+    cells. Empty boxes are always "no" (moving nothing changes nothing) and are
+    a free visual shortcut; the feasibility run found 20% of training and 14%
+    of validation boxes empty. Use ``min_affected=5`` for a structural
+    benchmark and report the empty-box subset separately.
     """
     rng = np.random.default_rng(seed)
     points = np.asarray(points, dtype=np.float64)
     out: List[Intervention] = []
-    yes = no = 0
-    target_yes = n // 2 if balance else None
-    target_no = n - (target_yes or 0) if balance else None
 
-    for attempt in range(max(1, n * max_attempts_factor)):
-        if len(out) >= n:
-            break
-        if balance and yes >= target_yes and no >= target_no:
+    if not balance:
+        for _ in range(max(1, n * max_attempts_factor)):
+            if len(out) >= n:
+                break
+            edit = sample_edit(points, rng, radius_frac=float(rng.uniform(0.10, 0.22)))
+            if edit.affected < min_affected:
+                continue
+            eff = measure_effect(points, types, edit, n_types=n_types, grid=grid)
+            out.append(
+                Intervention(
+                    edit=edit,
+                    effect=eff,
+                    points_after=apply_edit(points, edit) if return_points else None,
+                )
+            )
+        return out
+
+    if balance_by_kind:
+        slots: List[Tuple[str, bool]] = []
+        per_kind: Dict[str, List[bool]] = {k: [] for k in EDIT_KINDS}
+        for i in range(n):
+            kind = EDIT_KINDS[i % len(EDIT_KINDS)]
+            want = len(per_kind[kind]) % 2 == 0  # yes, no, yes, no ...
+            per_kind[kind].append(want)
+            slots.append((kind, want))
+        per_slot_attempts = max(4, max_attempts_factor)
+        for kind, want in slots:
+            for _ in range(per_slot_attempts):
+                edit = sample_edit(
+                    points,
+                    rng,
+                    kind=kind,
+                    radius_frac=float(rng.uniform(0.10, 0.22)),
+                )
+                if edit.affected < min_affected:
+                    continue
+                eff = measure_effect(points, types, edit, n_types=n_types, grid=grid)
+                if eff.changed != want:
+                    continue
+                out.append(
+                    Intervention(
+                        edit=edit,
+                        effect=eff,
+                        points_after=apply_edit(points, edit) if return_points else None,
+                    )
+                )
+                break
+        return out
+
+    yes = no = 0
+    target_yes = n // 2
+    target_no = n - target_yes
+    for _ in range(max(1, n * max_attempts_factor)):
+        if len(out) >= n or (yes >= target_yes and no >= target_no):
             break
         edit = sample_edit(points, rng, radius_frac=float(rng.uniform(0.10, 0.22)))
+        if edit.affected < min_affected:
+            continue
         eff = measure_effect(points, types, edit, n_types=n_types, grid=grid)
-        if balance:
-            if eff.changed and yes >= target_yes:
-                continue
-            if (not eff.changed) and no >= target_no:
-                continue
+        if eff.changed and yes >= target_yes:
+            continue
+        if (not eff.changed) and no >= target_no:
+            continue
         out.append(
             Intervention(
                 edit=edit,
@@ -203,6 +299,9 @@ def summarise(interventions: List[Intervention]) -> Dict[str, float]:
             k: float(np.mean([i.effect.changed for i in interventions if i.edit.kind == k]))
             for k in EDIT_KINDS
             if any(i.edit.kind == k for i in interventions)
+        },
+        "n_by_kind": {
+            k: int(sum(1 for i in interventions if i.edit.kind == k)) for k in EDIT_KINDS
         },
     }
 

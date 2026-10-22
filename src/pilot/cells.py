@@ -93,6 +93,12 @@ def cells_from_cellvit_json(path: str | Path) -> Tuple[np.ndarray, np.ndarray]:
     where each cell carries a ``centroid`` and a class label. This parser is
     deliberately tolerant about the surrounding schema: only the centroid and
     the class are needed downstream.
+
+    Class labels are returned as *strings*, not factorised per file. A per-ROI
+    factorisation would give the same class a different integer in every ROI
+    (``Tumor`` can be 0 in a ROI where it is alone and 1 in a ROI that also has
+    ``Stroma``), silently breaking the type-aware descriptor. The global
+    vocabulary is built later by :func:`global_type_index`.
     """
     with open(path, "r", encoding="utf-8") as fh:
         data = json.load(fh)
@@ -109,9 +115,8 @@ def cells_from_cellvit_json(path: str | Path) -> Tuple[np.ndarray, np.ndarray]:
         points.append(cen)
         labels.append(str(label))
     if not points:
-        return np.zeros((0, 2)), np.zeros(0, dtype=int)
-    vocab = {name: i for i, name in enumerate(sorted(set(labels)))}
-    return np.asarray(points, dtype=np.float64), np.asarray([vocab[l] for l in labels], dtype=int)
+        return np.zeros((0, 2)), np.zeros(0, dtype=object)
+    return np.asarray(points, dtype=np.float64), np.asarray(labels, dtype=object)
 
 
 def cells_from_cellvit_dir(json_dir: str | Path, out_dir: str | Path, suffix: str = "_cells") -> pd.DataFrame:
@@ -132,10 +137,22 @@ def cells_from_cellvit_dir(json_dir: str | Path, out_dir: str | Path, suffix: st
         rows.append({"roi_id": roi_id, "n_cells": int(len(pts)), "error": ""})
     return pd.DataFrame(rows)
 
-def write_cells(points: np.ndarray, types: np.ndarray, path: str | Path) -> None:
-    """Write the one format the rest of the pipeline reads: x, y, type."""
+def write_cells(points: np.ndarray, types: Optional[np.ndarray], path: str | Path) -> None:
+    """Write the one format the rest of the pipeline reads: x, y, type.
+
+    Integer type ids (the segmenter's output) are written as ``t0``, ``t1``;
+    string ids (CellViT class names) are preserved verbatim so that
+    :func:`global_type_index` can build one vocabulary across ROIs.
+    """
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame(
-        {"x": points[:, 0], "y": points[:, 1], "type": [f"t{int(t)}" for t in types]}
-    ).to_csv(path, index=False)
+    points = np.asarray(points, dtype=np.float64).reshape(-1, 2)
+    if types is None:
+        labels = [f"t{0}"] * len(points)
+    else:
+        arr = np.asarray(types)
+        if np.issubdtype(arr.dtype, np.integer):
+            labels = [f"t{int(t)}" for t in arr]
+        else:
+            labels = [str(t) for t in arr]
+    pd.DataFrame({"x": points[:, 0], "y": points[:, 1], "type": labels}).to_csv(path, index=False)

@@ -25,7 +25,16 @@ class TrainConfig:
     lam_structure: float = 0.5
     lam_cf: float = 0.5
     seed: int = 0
+    # 0 = train on the full descriptor; 5 = topology block only (n_comp,
+    # hole_count, hole_area_frac, h0_max, h0_sum). The 3x3 regional block was
+    # consistently unlearned on real data and diluted the topology loss.
+    structure_dims: int = 0
     log_every: int = 10
+    # Save an intermediate adapter every N steps (0 = only the final one).
+    # The real-data runs are short and the balance between under- and
+    # overfitting is the main open question, so keep the trajectory to
+    # evaluate/early-stop afterwards.
+    checkpoint_every: int = 50
     save_dir: str = "out/pilot"
     max_new_tokens: int = 8
 
@@ -54,6 +63,7 @@ def build_batch(processor, example: Dict[str, Any], device, image_tokens: int = 
     find the answer boundary: ~2x preprocessing, but no fragile string matching
     on the chat template.
     """
+    import torch
     from PIL import Image
 
     from .vision import fit_image
@@ -74,6 +84,12 @@ def build_batch(processor, example: Dict[str, Any], device, image_tokens: int = 
     labels = full["input_ids"].clone()
     n_prompt = int(prompt["input_ids"].shape[1])
     if n_prompt >= labels.shape[1]:
+        return None
+    # The two processor calls must produce the same prefix. If the tokenizer
+    # merged the answer with the assistant header (or the image expansion
+    # differs), masking the first n_prompt tokens would mask part of the
+    # answer, so refuse the example instead of training on a wrong boundary.
+    if not torch.equal(full["input_ids"][0, :n_prompt], prompt["input_ids"][0]):
         return None
     labels[:, :n_prompt] = -100
     if (labels != -100).sum() == 0:
@@ -98,9 +114,18 @@ def collate_aux(example: Dict[str, Any]):
     center = example.get("center") or [0.5, 0.5]
     radius = float(example.get("radius") or 0.2)
     kind = example.get("kind", "collapse")
+    vector = example.get("vector") or [0.0, 0.0]
     feats = torch.tensor(
-        [[float(center[0]), float(center[1]), radius]
-         + [1.0 if kind == k else 0.0 for k in ("collapse", "expand", "translate")]],
+        [
+            [
+                float(center[0]),
+                float(center[1]),
+                radius,
+                float(vector[0]),
+                float(vector[1]),
+            ]
+            + [1.0 if kind == k else 0.0 for k in ("collapse", "expand", "translate")]
+        ],
         dtype=torch.float32,
     )
     return desc, changed, feats
@@ -126,7 +151,7 @@ def run(
     import torch
     from transformers import get_cosine_schedule_with_warmup
 
-    from .heads import build_heads
+    from .heads import build_heads, grid_from_hidden
     from .model import image_token_id
 
     torch.manual_seed(cfg.seed)
@@ -135,9 +160,28 @@ def run(
     # heads first: the optimiser and the scheduler must be built once, over the
     # final parameter set. Creating the scheduler before the heads and then
     # replacing the optimiser leaves the schedule attached to an unused object.
-    d_model = int(getattr(model.config, "hidden_size", 0) or model.config.text_config.hidden_size)
+    base_model = model.get_base_model() if hasattr(model, "get_base_model") else model
+    base_cfg = base_model.config
+    d_model = int(
+        getattr(base_cfg, "hidden_size", 0)
+        or getattr(getattr(base_cfg, "text_config", None), "hidden_size", 0)
+        or 0
+    )
+    if d_model <= 0:
+        raise ValueError("cannot find the text hidden size on the model config")
+    vision_cfg = getattr(base_cfg, "vision_config", None)
+    merge_size = int(getattr(vision_cfg, "spatial_merge_size", 2) or 2)
     n_desc = len(cf[0]["descriptor"]) if cf else 0
-    heads = build_heads(d_model, max(n_desc, 1), hidden=1024).to(device) if (use_aux and cf) else None
+    s_dims = int(cfg.structure_dims or n_desc)
+    if s_dims > n_desc:
+        raise ValueError(
+            f"structure_dims={s_dims} exceeds descriptor length {n_desc}"
+        )
+    heads = (
+        build_heads(d_model, max(s_dims, 1), hidden=1024).to(device)
+        if (use_aux and cf)
+        else None
+    )
 
     params = [p for p in model.parameters() if p.requires_grad]
     if heads is not None:
@@ -148,16 +192,21 @@ def run(
         opt, int(cfg.warmup_ratio * total_steps), total_steps
     )
 
-    iid = image_token_id(model)
+    iid = image_token_id(base_model)
     rng = np.random.default_rng(cfg.seed)
     model.train()
+    warned_grid = False
 
     history: List[Dict[str, float]] = []
+    save_dir = Path(cfg.save_dir)
+    save_dir.mkdir(parents=True, exist_ok=True)
     t0 = time.time()
     micro = 0
     for step in range(total_steps):
         opt.zero_grad(set_to_none=True)
         logs: Dict[str, float] = {}
+        used = 0
+        did_backward = False
 
         for sub in range(cfg.grad_accum):
             use_growth = bool(growth) and (micro % 4 != 3)   # 3 growth : 1 counterfactual
@@ -170,27 +219,63 @@ def run(
             if batch is None:
                 continue
 
-            need_aux = heads is not None and ex.get("task") == "cf"
+            used += 1
+            # The before/after image is a two-panel composite: the edit centre
+            # in the left panel does not address the pooled token grid of the
+            # whole composite, so do not train the geometry-conditioned heads on
+            # it. The language loss is the experiment there.
+            need_aux = (
+                heads is not None
+                and ex.get("task") == "cf"
+                and ex.get("presentation", "box") == "box"
+            )
             out = model(**batch, output_hidden_states=need_aux)
             loss = out.loss / cfg.grad_accum
-            logs["lm"] = logs.get("lm", 0.0) + float(out.loss.detach()) / cfg.grad_accum
+            logs["lm"] = logs.get("lm", 0.0) + float(out.loss.detach())
 
             if need_aux:
                 hidden = out.hidden_states[-1]
                 vis = batch["input_ids"] == iid
-                w = vis.unsqueeze(-1).to(hidden.dtype)
-                pooled = (hidden * w).sum(1) / w.sum(1).clamp(min=1.0)
+                grid = grid_from_hidden(
+                    hidden, vis, batch.get("image_grid_thw"), merge_size=merge_size
+                )
+                if grid is None:
+                    # Shape mismatch: repeat the global mean into a 3x3 grid so
+                    # the heads have the right interface. This loses the
+                    # localisation the pilot is trying to test, so say so once.
+                    w = vis.unsqueeze(-1).to(hidden.dtype)
+                    pooled = (hidden * w).sum(1) / w.sum(1).clamp(min=1.0)
+                    grid = pooled[0].view(1, 1, -1).expand(3, 3, -1)
+                    if not warned_grid:
+                        print(
+                            "[warn] image tokens do not form the expected grid; "
+                            "auxiliary heads fall back to global pooling",
+                            flush=True,
+                        )
+                        warned_grid = True
                 desc, changed, feats = (t.to(device) for t in collate_aux(ex))
-                s_pred = heads["structure"](hidden, attention_mask=vis)
-                l_s = smooth_l1(s_pred, torch.log1p(desc.clamp(min=0.0)))
-                logit = heads["cf"](pooled, feats)
+                s_pred = heads["structure"](grid)
+                # Topology-only mode drops the 3x3 regional block, which had
+                # negative R^2 on both real cohorts.
+                target = torch.log1p(desc[:, :s_dims].clamp(min=0.0))
+                l_s = smooth_l1(s_pred, target)
+                logit = heads["cf"](grid, feats)
                 l_c = torch.nn.functional.binary_cross_entropy_with_logits(logit, changed)
                 loss = loss + (cfg.lam_structure * l_s + cfg.lam_cf * l_c) / cfg.grad_accum
-                logs["struct"] = logs.get("struct", 0.0) + float(l_s.detach()) / cfg.grad_accum
-                logs["cf"] = logs.get("cf", 0.0) + float(l_c.detach()) / cfg.grad_accum
+                logs["struct"] = logs.get("struct", 0.0) + float(l_s.detach())
+                logs["cf"] = logs.get("cf", 0.0) + float(l_c.detach())
 
             loss.backward()
+            did_backward = True
 
+        if not did_backward:
+            # Every example in this step failed preprocessing. Do not reuse the
+            # previous step's graph (and do not advance the schedule).
+            print(f"step {step + 1:4d} | no trainable example, skipping", flush=True)
+            continue
+
+        n_used = max(used, 1)
+        logs = {k: v / n_used for k, v in logs.items()}
         torch.nn.utils.clip_grad_norm_(params, cfg.max_grad_norm)
         opt.step()
         sched.step()
@@ -209,8 +294,18 @@ def run(
             if torch.cuda.is_available():
                 print(f"           vram {torch.cuda.max_memory_allocated() / 1024**3:.1f} GB", flush=True)
 
-    save_dir = Path(cfg.save_dir)
-    save_dir.mkdir(parents=True, exist_ok=True)
+        if (
+            cfg.checkpoint_every
+            and (step + 1) % cfg.checkpoint_every == 0
+            and (step + 1) < total_steps
+        ):
+            ckpt = save_dir / f"checkpoint-{step + 1}"
+            ckpt.mkdir(parents=True, exist_ok=True)
+            model.save_pretrained(ckpt)
+            if heads is not None:
+                torch.save(heads.state_dict(), ckpt / "aux_heads.pt")
+            print(f"           checkpoint {ckpt}", flush=True)
+
     model.save_pretrained(save_dir)
     if heads is not None:
         torch.save(heads.state_dict(), save_dir / "aux_heads.pt")

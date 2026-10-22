@@ -26,6 +26,8 @@ from typing import List, Optional, Sequence, Tuple
 import numpy as np
 import pandas as pd
 
+from .cells import write_cells
+
 
 def segment_classical(
     image,
@@ -53,8 +55,21 @@ def segment_classical(
     except ValueError:
         return np.zeros((0, 2)), np.zeros(0, dtype=int)
 
+    # Otsu returns a histogram bin centre.  When the background is a single
+    # near-zero value and nuclei occupy a few percent of the pixels, the
+    # selected centre can land just *below* that background value.  ``>`` then
+    # calls the whole image foreground (observed on 4/36 synthetic ROIs: the
+    # threshold was 0.0215 while the background normalised to 0.0231).  Detect
+    # that degenerate case and split halfway between background and the upper
+    # tail instead.
+    if thresh <= float(np.median(norm)):
+        thresh = 0.5 * (float(np.median(norm)) + float(np.quantile(norm, 0.99)))
+
     binary = norm > thresh
-    binary = remove_small_objects(binary, min_size=min_area)
+    try:  # scikit-image >= 0.26 renamed min_size -> max_size (<= semantics)
+        binary = remove_small_objects(binary, max_size=min_area - 1)
+    except TypeError:
+        binary = remove_small_objects(binary, min_size=min_area)
     binary = ndimage.binary_fill_holes(binary)
     if not binary.any():
         return np.zeros((0, 2)), np.zeros(0, dtype=int)
@@ -114,14 +129,6 @@ def segment_image(image_path: str | Path, backend: str = "classical", **kwargs):
     raise ValueError(f"unknown backend {backend!r}; use 'classical' or 'mask'")
 
 
-def write_cells(points: np.ndarray, types: np.ndarray, path: str | Path) -> None:
-    path = Path(path)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    pd.DataFrame({"x": points[:, 0], "y": points[:, 1], "type": [f"t{int(t)}" for t in types]}).to_csv(
-        path, index=False
-    )
-
-
 def segment_dir(
     images_dir: str | Path,
     out_dir: str | Path,
@@ -130,9 +137,18 @@ def segment_dir(
     **kwargs,
 ) -> pd.DataFrame:
     images = sorted(Path(images_dir).glob(pattern))
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
     rows = []
     for img in images:
         roi_id = img.stem
+        out_path = out_dir / f"{roi_id}.csv"
+        # Remove a pre-existing table first.  Otherwise a failed segmentation
+        # silently falls back to whatever was in the output directory (e.g. the
+        # synthetic ground truth written by `pilot synth`), and doctor cannot
+        # see that the segmenter failed.
+        if out_path.exists():
+            out_path.unlink()
         try:
             pts, types = segment_image(img, backend=backend, **kwargs)
         except Exception as exc:  # noqa: BLE001
@@ -141,7 +157,7 @@ def segment_dir(
         if len(pts) < 10:
             rows.append({"roi_id": roi_id, "n_cells": int(len(pts)), "error": "too few cells"})
             continue
-        write_cells(pts, types, Path(out_dir) / f"{roi_id}.csv")
+        write_cells(pts, types, out_path)
         rows.append({"roi_id": roi_id, "n_cells": int(len(pts)), "error": ""})
     return pd.DataFrame(rows)
 

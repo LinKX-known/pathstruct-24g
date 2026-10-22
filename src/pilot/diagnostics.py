@@ -108,12 +108,13 @@ def doctor(
     manifest,
     cells_dir: str | Path,
     max_report: int = 10,
+    min_cells: int = 60,
 ) -> Dict[str, Any]:
     """Check a cohort before training and report actionable problems."""
     rows = manifest.to_dict(orient="records") if hasattr(manifest, "to_dict") else list(manifest)
     problems: List[str] = []
     counts = []
-    missing_cells = missing_images = too_few = bad_desc = 0
+    missing_cells = missing_images = too_few = bad_desc = out_of_bounds = 0
     labels: Dict[str, int] = {}
 
     for r in rows:
@@ -128,7 +129,25 @@ def doctor(
             continue
         pts, _ = item
         counts.append(len(pts))
-        if len(pts) < 60:
+        if len(pts) >= 8 and Path(img).exists():
+            # A cell table in slide-level or downsampled coordinates produces a
+            # finite but meaningless descriptor. Catch it before the GPU run.
+            try:
+                from PIL import Image
+
+                with Image.open(img) as im:
+                    w, h = im.size
+                outside = np.mean(
+                    (pts[:, 0] < -1)
+                    | (pts[:, 0] > w + 1)
+                    | (pts[:, 1] < -1)
+                    | (pts[:, 1] > h + 1)
+                )
+                if outside > 0.05:
+                    out_of_bounds += 1
+            except Exception:
+                pass
+        if len(pts) < min_cells:
             too_few += 1
             continue
         d = describe(pts).values
@@ -140,9 +159,16 @@ def doctor(
     if missing_cells:
         problems.append(f"{missing_cells} ROIs have no cells/{{roi_id}}.csv (run `pilot segment`)")
     if too_few:
-        problems.append(f"{too_few} ROIs have fewer than 60 cells (topology will be noise)")
+        problems.append(
+            f"{too_few} ROIs have fewer than {min_cells} cells (topology will be noise)"
+        )
     if bad_desc:
         problems.append(f"{bad_desc} ROIs produced non-finite descriptors")
+    if out_of_bounds:
+        problems.append(
+            f"{out_of_bounds} ROIs have >5% of cells outside the image: "
+            f"the cell table and image are probably on different coordinate scales"
+        )
     if labels and max(labels.values()) > 0.8 * len(rows):
         problems.append(
             f"label imbalance: {max(labels.values())}/{len(rows)} are one class; balanced accuracy will be unstable"
@@ -154,6 +180,7 @@ def doctor(
         "cells_median": float(np.median(counts)) if counts else 0.0,
         "cells_min": int(np.min(counts)) if counts else 0,
         "cells_max": int(np.max(counts)) if counts else 0,
+        "cells_out_of_bounds": out_of_bounds,
         "problems": problems,
         "ok": not problems,
     }
