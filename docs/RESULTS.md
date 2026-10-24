@@ -249,7 +249,7 @@ Held-out（60 cf；14 患者；final 150 步）：
 
 ## 5. 下一步（按优先级）
 
-1. **错框对照（已完成，2026-10-25，见 §12）**：6 个 adapter（topo-only 5 维 vs full-descriptor 23 维，各 3 seeds）在 50 条 wrong-box 上评估。两组的正确翻转率均值都是 0.712；捷径率 topo 0.280 vs full 0.253，差异在噪声内——**没有证据表明拓扑监督提高了局部敏感性**。下一步不是再加 seed，而是重设计零膨胀目标（§12.5）。
+1. **错框对照（已完成，2026-10-25，见 §12）**：6 个 adapter（topo-only 5 维 vs full-descriptor 23 维，各 3 seeds）在 50 条 wrong-box 上评估。两组的正确翻转率均值都是 0.712；捷径率 topo 0.280 vs full 0.253，差异在噪声内——**没有证据表明拓扑监督提高了局部敏感性**。零膨胀目标已在 §13 用 hurdle 试点；下一步是隔离 presence/regression 干扰（§13.6）。
 2. **重写结构目标（hurdle 已试，2026-10-25，见 §13）**：hurdle 分解（presence BCE + 正样本 Huber）让 `hole_area_frac` 的 presence AUC 稳定升到 0.85–0.89（MoNuSeg 3 seeds），但 dense 维（尤其 `h0_sum`）一致退化，naive 联合训练不是净收益。下一步应隔离 presence/regression 分支、在训练内部验证集上调损失权重，并稳健化 `hole_area_frac` 的正样本目标；TopoSlide 式持久性直方图 + CDF 仍待做。
 3. **P2 用真实下游标签**：DHMC 生长模式（143 WSI，5 类）patch 采样 + 多数投票/MIL；先跑 A0（no-aux）vs A1（structure-on-growth），目标方向性 +2 pt；注意 143 张 slide 对 2 pt 功效不足，需合并罕见类或加外部数据。详见 `docs/P2_TOPOLOGY_PLAN.md`。
 4. **扩真实数据/重定义任务**：PanNuke 600 步已试，收益仅 +1.2 pt；下一步增加 patch/患者数，并重做 cf 任务难度（translate/collapse 尤其弱）。所有结果报告 patient/tissue 级 CI。
