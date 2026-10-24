@@ -833,7 +833,7 @@ MoNuSeg 的 presence 指标只有 4/8 个正样本，任何单 seed AUC 都极�
 - `hole_area_frac`：presence AUC Δ +0.095 [−0.31, +0.53]（不显著）；正样本 MAE Δ **+0.129 [+0.09, +0.16]**——presence 可能略好，但幅值回归显著变差。
 - dense 维 expected MAE Δ：`h0_sum` **+0.045 [+0.015, +0.076]**、`h0_max` +0.011 [+0.002, +0.022]、`n_comp` +0.011 [−0.000, +0.019]。
 
-**Seed 1 复现（600 步）**：`hole_count` AUC **0.814**、正样本 MAE/mean **1.62**；`hole_area_frac` AUC **0.593**、正样本 MAE/mean **11.46**；`h0_sum` R² **0.232**、MAE/mean **0.77**。bootstrap：`hole_count` ΔAUC +0.182 [−0.02, +0.87]、Δ正样本 MAE −0.478 [−0.51, −0.24]；`hole_area` ΔAUC +0.114 [−0.23, +0.54]、Δ正样本 MAE **+0.070 [+0.05, +0.10]**；`h0_sum` ΔMAE **+0.052 [+0.02, +0.08]**。方向与 seed 0 完全一致。
+**Seed 1 复现（600 步）**：`hole_count` AUC **0.814**、正样本 MAE/mean **1.62**；`hole_area_frac` AUC **0.593**、正样本 MAE/mean **11.46**；`h0_sum` R² **0.232**、MAE/mean **0.77**。bootstrap：`hole_count` ΔAUC +0.182 [−0.02, +0.87]、Δ正样本 MAE −0.478 [−0.51, −0.24]；`hole_area` ΔAUC +0.114 [−0.23, +0.54]、Δ正样本 MAE **+0.070 [+0.05, +0.10]**；`h0_sum` ΔMAE **+0.052 [+0.02, +0.08]**。关键方向与 seed 0 一致（presence 改善、`hole_area` 幅值退化、`h0_sum` 退化；`h0_max` 在 seed 1 上接近旧头）。
 
 **检查点不是过拟合问题**：`h0_sum` R² 在 ck300/ck500 分别为 **0.303 / 0.288**，仍低于旧头 0.520；ck500 的 `hole_count` AUC 0.840、`hole_area` 0.592，与 final 接近。非 hurdle 维的退化在训练中段就存在，不是最后几步造成的。
 
