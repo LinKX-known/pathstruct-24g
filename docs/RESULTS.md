@@ -16,6 +16,7 @@
 - 真实 H&E（PanNuke）：反事实头 2 个 seed 为 0.595/0.582（mean **0.588**），blank 0.530，但 box-geometry 0.577——**只高约 1 pt，视觉增量未证实**；训练 loss 停在 0.5–0.8（underfit，1.3 epochs），0.588 是下界；结构头旧五维平均 R² 为负（由 `hole_area_frac` 驱动；非退化维 mean R² +0.13、`h0_sum` R² +0.52）。
 - **扩展到 600 步 + topology-only（2026-10-22）**：PanNuke cf **0.600**（blank 0.547，real−blank +5.3 pt，CI [0.5, 10.9]），仅比 300 步高 1.2 pt；MoNuSeg 3 seeds mean **0.594**（full descriptor 0.611），blank 0.489，expand 0.750。两组的结构 topo R² 仍为负；去掉 3×3 regional block 没有修复结构回归。
 - **错框对照（2026-10-25）**：模型确实部分依赖框内局部信息——22 条“原 yes→挪框后 no”中 **71.2%** 正确翻成 no（两个 arm 的均值相同），但仍有 27–32% 保持 yes、22–36% 的 both-no 行错误答 yes。**拓扑监督（5 维）相对 full-descriptor 监督（23 维）没有带来局部敏感性增量**（捷径率 0.280 vs 0.253，CI 重叠）。详见 §12。
+- **Hurdle 目标 pilot（2026-10-25）**：presence 分支有效——MoNuSeg `hole_area_frac` presence AUC 三个 seed 从 0.20–0.60 升到 **0.85–0.89**，PanNuke `hole_count` 0.674→**0.834**、正样本 MAE/mean 6.73→1.30；但 dense 维一致退化，`h0_sum` expected MAE 在 MoNuSeg 三个 seed 全部显著变差（+0.16 到 +0.22），PanNuke R² 0.52→0.27。**naive hurdle 不是净收益，不能写“结构头已修复”**；详见 §13。
 - 因此：**MoNuSeg 上反事实头有明确的小幅视觉信号**（0.611 vs geometry 0.467；expand 0.722）；**PanNuke 的视觉增量未证实**（0.588 vs geometry 0.577，只差 1 pt；600 步只有 blank，没有 geometry 对照）。expand 在三个 seed 上稳定（0.72–0.75），但仍要警惕它是较容易的编辑类型，不能单独当作“模型看懂了拓扑”的证据。**结构头在连通性/持久性维（`h0_sum`、`n_comp`、`h0_max`）上有弱但可测的信号，但在零膨胀的 `hole_area_frac` 维上没有学会；旧五维平均 R² 被这一维支配，不能作为“结构头整体失败”的证据**；P2 下游迁移和 LM yes/no 读出仍未证明。
 
 ---
@@ -249,7 +250,7 @@ Held-out（60 cf；14 患者；final 150 步）：
 ## 5. 下一步（按优先级）
 
 1. **错框对照（已完成，2026-10-25，见 §12）**：6 个 adapter（topo-only 5 维 vs full-descriptor 23 维，各 3 seeds）在 50 条 wrong-box 上评估。两组的正确翻转率均值都是 0.712；捷径率 topo 0.280 vs full 0.253，差异在噪声内——**没有证据表明拓扑监督提高了局部敏感性**。下一步不是再加 seed，而是重设计零膨胀目标（§12.5）。
-2. **重写结构目标**：regional block 已证明不是主因；对零膨胀的 `hole_area_frac`/H1 用 **hurdle 分解**（presence BCE + 正样本 Huber）或 TopoSlide 式 **持久性直方图 + CDF + 分零/非零 loss**；报告 presence AUC、正样本 MAE/Spearman，而不是只看五维平均 R²。
+2. **重写结构目标（hurdle 已试，2026-10-25，见 §13）**：hurdle 分解（presence BCE + 正样本 Huber）让 `hole_area_frac` 的 presence AUC 稳定升到 0.85–0.89（MoNuSeg 3 seeds），但 dense 维（尤其 `h0_sum`）一致退化，naive 联合训练不是净收益。下一步应隔离 presence/regression 分支、在训练内部验证集上调损失权重，并稳健化 `hole_area_frac` 的正样本目标；TopoSlide 式持久性直方图 + CDF 仍待做。
 3. **P2 用真实下游标签**：DHMC 生长模式（143 WSI，5 类）patch 采样 + 多数投票/MIL；先跑 A0（no-aux）vs A1（structure-on-growth），目标方向性 +2 pt；注意 143 张 slide 对 2 pt 功效不足，需合并罕见类或加外部数据。详见 `docs/P2_TOPOLOGY_PLAN.md`。
 4. **扩真实数据/重定义任务**：PanNuke 600 步已试，收益仅 +1.2 pt；下一步增加 patch/患者数，并重做 cf 任务难度（translate/collapse 尤其弱）。所有结果报告 patient/tissue 级 CI。
 5. **提高局部有效分辨率**：local crop / 更高 tokens；translate/collapse 是弱项；当前 full-ROI 1024 仍可能不够。
@@ -770,4 +771,115 @@ python scripts/eval/diagnose_structure.py \
 python scripts/eval/bootstrap_heads.py --real out/heads_topo_real_s0.json \
   --blank out/heads_topo_blank_s0.json \
   --train-data data/real/monuseg_train/cf_train_bal.jsonl --out out/bootstrap_topo_s0.json
+```
+
+---
+
+## 13. 2026-10-25 Hurdle 目标 pilot：presence 学会了，但 dense 维被破坏
+
+> 目的：直接回应 §12 的结论——`hole_area_frac`/`hole_count` 的连续回归失败，是因为零膨胀目标被零尖峰支配。按 §5.2 / §11.4 的方案实现 hurdle 分解，并在 MoNuSeg 和 PanNuke 上做单 seed pilot；参数**先验固定**（零比例阈值 0.5、`pos_weight = clamp(neg/pos, 1, 20)`），没有用留出集调参。
+
+### 13.1 实现
+
+- 新开关 `pilot train --structure-hurdle`（`src/pilot/train.py`、`src/pilot/cli.py`）。
+- 结构头输出从 `D` 扩到 `D + K`：前 `D` 个是 log1p 回归，后 `K` 个是零膨胀维的 presence logits（`src/pilot/heads.py`）。
+- 损失：dense 维 smooth-L1；hurdle 维 `BCEWithLogits(presence, pos_weight)` + **只在正样本行上**的 smooth-L1（`src/pilot/train.py`）。
+- `structure_hurdle.json` 随 adapter 和每个 checkpoint 保存，记录 `dims/hurdle_dims/zero_fraction/pos_weight`；`eval_heads.py` 读取它重建头部，并在记录中保留 `s_reg`/`s_presence`/`hurdle_dims`。
+- 新增 `scripts/eval/diagnose_hurdle.py`（逐维 presence AUC / 正样本 MAE）和 `scripts/eval/bootstrap_hurdle.py`（按患者分组的配对 bootstrap）。**56 tests passed**。
+
+两个队列的 hurdle 维都是 `hole_count`/`hole_area_frac`（训练集零比例见下表）。
+
+### 13.2 正样本量（决定结论强度）
+
+| cohort | 训练行 | hole_count 正样本 | hole_area_frac 正样本 | 留出行 | 留出 hole_count 正样本 | 留出 hole_area 正样本 |
+|---|---|---|---|---|---|---|
+| MoNuSeg | 116 | **6** | **23** | 60 | **4** | **8** |
+| PanNuke | 1796 | 25 | 54 | 620 | 23 | 45 |
+
+MoNuSeg 的 presence 指标只有 4/8 个正样本，任何单 seed AUC 都极不稳定；PanNuke 是更可信的队列。
+
+### 13.3 MoNuSeg（3 seeds，150 步，seed 0/1/2）
+
+同一 seed 的旧 topo-only adapter 作为对照；下表是 3 个 seed 的均值（括号内为范围）。`posMAE/mean` 只在正样本行上算，基线是训练集正样本均值。
+
+| dim | presence AUC 旧 → hurdle | 正样本 MAE/mean 旧 → hurdle | expected R² 旧 → hurdle | expected MAE/mean 旧 → hurdle |
+|---|---|---|---|---|
+| n_comp | — | 0.904 → 0.931 | +0.029 → −0.213 | 0.904 → 0.931 |
+| hole_count | 0.374 (0.339–0.415) → **0.144** (0.071–0.228) | 20.53 → 13.75 | −0.071 → −0.066 | 0.887 → 0.659 |
+| hole_area_frac | 0.401 (0.200–0.601) → **0.868** (0.853–0.887) | 8.30 → 12.97 | −175.8 → −30.6 | 17.08 → 4.25 |
+| h0_max | — | 0.886 → 0.956 | +0.047 → −0.070 | 0.886 → 0.956 |
+| h0_sum | — | **0.931 → 1.670** | **−0.255 → −2.409** | 0.931 → 1.670 |
+
+按患者分组 bootstrap（与同 seed 旧头配对）：
+
+- `hole_area_frac` presence AUC 的 Δ 为 **+0.461 [+0.22, +0.68]、+0.687 [+0.38, +0.91]、+0.248 [−0.03, +0.50]**——三个 seed 方向一致，2/3 的 CI 不跨 0。
+- `hole_count` presence AUC 的 Δ 为 **−0.137、−0.342、−0.206**——方向一致为负，2/3 的 CI 不跨 0；但只有 4 个正样本，不能过度解读。
+- `h0_sum` 的 expected MAE Δ 为 **+0.219 [+0.09, +0.33]、+0.164 [+0.03, +0.29]、+0.190 [+0.08, +0.30]**——三个 seed 全部显著退化。
+- `h0_max` ΔMAE 为 +0.003、+0.027、−0.005，方向不一致。
+
+### 13.4 PanNuke（seed 0，600 步）
+
+| dim | presence AUC 旧 → hurdle | 正样本 MAE/mean 旧 → hurdle | expected R² 旧 → hurdle | expected MAE/mean 旧 → hurdle |
+|---|---|---|---|---|
+| n_comp | — | 0.283 → 0.294 | −0.024 → −0.150 | 0.91 → 0.94 |
+| hole_count | 0.674 → **0.834** | 6.73 → **1.30** | +0.007 → +0.051 | 1.41 → **1.02** |
+| hole_area_frac | 0.477 → 0.587 | 2.38 → **19.37** | −31.2 → −20.4 | 23.02 → **7.43** |
+| h0_max | — | 0.172 → 0.184 | −0.106 → −0.240 | 0.95 → 1.02 |
+| h0_sum | — | **0.184 → 0.230** | **+0.520 → +0.274** | **0.60 → 0.75** |
+
+按患者分组 bootstrap（1000 次）：
+
+- `hole_count`：presence AUC Δ **+0.185 [+0.05, +0.77]**；正样本 MAE Δ **−0.530 [−0.61, −0.46]**——presence 和幅值都改善。
+- `hole_area_frac`：presence AUC Δ +0.095 [−0.31, +0.53]（不显著）；正样本 MAE Δ **+0.129 [+0.09, +0.16]**——presence 可能略好，但幅值回归显著变差。
+- dense 维 expected MAE Δ：`h0_sum` **+0.045 [+0.015, +0.076]**、`h0_max` +0.011 [+0.002, +0.022]、`n_comp` +0.011 [−0.000, +0.019]。
+
+**检查点不是过拟合问题**：`h0_sum` R² 在 ck300/ck500 分别为 **0.303 / 0.288**，仍低于旧头 0.520；ck500 的 `hole_count` AUC 0.840、`hole_area` 0.592，与 final 接近。非 hurdle 维的退化在训练中段就存在，不是最后几步造成的。
+
+### 13.5 结论
+
+**成立**：
+
+1. Hurdle 分解确实解决了“presence 学不会”的问题，至少在 `hole_area_frac` 上：MoNuSeg 3 seeds 的 presence AUC 从 0.20–0.60 提升到 **0.85–0.89**；PanNuke `hole_count` 从 0.674 提升到 **0.834**。
+2. `hole_count` 的正样本幅值在 PanNuke 上大幅改善（MAE/mean **6.73 → 1.30**），MoNuSeg 也一致改善（20.5 → 13.8）。
+3. 零膨胀维的 expected-value MAE 明显下降（MoNuSeg `hole_area` 17.1 → 4.2；PanNuke 23.0 → 7.4），因为 presence 概率把大量零样本的预测压向 0。
+
+**不成立/代价**：
+
+1. **naive hurdle 不是净收益**：dense 维一致退化，`h0_sum` 最严重——MoNuSeg expected MAE 0.93 → 1.67（3 seeds 全部显著），PanNuke 0.60 → 0.75、R² 0.52 → 0.27。
+2. `hole_area_frac` 的正样本幅值回归没有学好：PanNuke MAE/mean 2.38 → 19.37（旧头的近零预测在绝对误差上反而更接近这些很小的目标）；MoNuSeg 也偏高。
+3. 因此**不能写“hurdle 修复了结构头”**；正确表述是：**presence 分支有效，但当前联合训练方式破坏了原本有信号的 dense 拓扑维。**
+
+### 13.6 下一步（按优先级）
+
+1. **隔离 presence 与 regression 的相互干扰**：分离输出分支（独立线性层），并给 presence 损失一个独立系数；系数必须在训练内部验证集上选，**不能看留出集调**。
+2. **`hole_area_frac` 正样本目标稳健化**：winsorize（训练集 1–99%）、median/Huber 回归、或对正样本做 rank/quantile 目标；当前的正样本只有 45 个（PanNuke）/23 个（MoNuSeg），幅值回归本身功效不足。
+3. **保留 dense 维的基线监督**：例如 dense 维继续用旧 loss，hurdle 只替换两个零膨胀维，并给 dense loss 更高权重；或者先冻结 trunk，只训练 presence/regression 的独立读出。
+4. 在解决干扰之前，**不要把 hurdle 接到 P2 下游实验**；P2 仍需要 DHMC 数据，且当前结构头不是“越改越好”的状态。
+
+### 13.7 复现命令
+
+```bash
+# MoNuSeg seed 0/1/2
+for s in 0 1 2; do
+  pilot train --cf data/real/monuseg_train/cf_train_bal.jsonl --steps 150 \
+    --grad-accum 8 --seed $s --preset 4b_bf16_1024 --structure-dims 5 \
+    --structure-hurdle --out out/p1_real_hurdle_s$s
+  python scripts/eval/eval_heads.py --adapter out/p1_real_hurdle_s$s \
+    --data data/real/monuseg_test/cf_bal.jsonl \
+    --train-data data/real/monuseg_train/cf_train_bal.jsonl --preset 4b_bf16_1024 \
+    --out out/heads_hurdle_real_s$s.json --metrics-out out/metrics_hurdle_real_s$s.json
+done
+
+# PanNuke seed 0
+pilot train --cf data/real/pannuke_train/cf_train_bal.jsonl --steps 600 \
+  --grad-accum 8 --seed 0 --preset 4b_bf16_1024 --structure-dims 5 \
+  --structure-hurdle --out out/p1_pannuke600_hurdle_s0
+
+# 对比与 bootstrap
+python scripts/eval/diagnose_hurdle.py \
+  --pred out/heads_topo_real_s0.json --pred out/heads_hurdle_real_s0.json \
+  --train-data data/real/monuseg_train/cf_train_bal.jsonl --dims 5
+python scripts/eval/bootstrap_hurdle.py \
+  --old out/heads_topo_real_s0.json --new out/heads_hurdle_real_s0.json \
+  --dims 5 --n-boot 2000
 ```
