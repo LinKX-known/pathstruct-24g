@@ -1,6 +1,6 @@
 # pathstruct-24g 可行性验证：代码问题与结果
 
-**日期**：2026-10-21（初版）；2026-10-22（补充 §3.4 扩展实验与断点恢复记录）  
+**日期**：2026-10-21（初版）；2026-10-22（补充 §3.4 扩展实验与断点恢复记录）；2026-10-25（补充 §12 错框对照与逐维诊断复算）  
 **硬件/环境**：RTX 4090 D 24 GB；Qwen3-VL-4B-Instruct（bf16，LoRA r=8，`all-linear`）；transformers 4.57.6；torch 2.5.1+cu124  
 **数据**：合成队列；真实 H&E 的 MoNuSeg 与 PanNuke（RationAI 公开导出，CC BY-NC-SA）  
 **说明**：本报告只做可行性验证，不是临床/病理结论。所有数字均为留出患者或留出组织上的结果。
@@ -15,6 +15,7 @@
 - 真实 H&E（MoNuSeg）：反事实头 3 个 seed 为 0.583/0.600/0.650（mean **0.611**），blank 0.500，box-geometry 0.467；**expand 类稳定 0.722**；结构头 topology R² **为负**。
 - 真实 H&E（PanNuke）：反事实头 2 个 seed 为 0.595/0.582（mean **0.588**），blank 0.530，但 box-geometry 0.577——**只高约 1 pt，视觉增量未证实**；训练 loss 停在 0.5–0.8（underfit，1.3 epochs），0.588 是下界；结构头旧五维平均 R² 为负（由 `hole_area_frac` 驱动；非退化维 mean R² +0.13、`h0_sum` R² +0.52）。
 - **扩展到 600 步 + topology-only（2026-10-22）**：PanNuke cf **0.600**（blank 0.547，real−blank +5.3 pt，CI [0.5, 10.9]），仅比 300 步高 1.2 pt；MoNuSeg 3 seeds mean **0.594**（full descriptor 0.611），blank 0.489，expand 0.750。两组的结构 topo R² 仍为负；去掉 3×3 regional block 没有修复结构回归。
+- **错框对照（2026-10-25）**：模型确实部分依赖框内局部信息——22 条“原 yes→挪框后 no”中 **71.2%** 正确翻成 no（两个 arm 的均值相同），但仍有 27–32% 保持 yes、22–36% 的 both-no 行错误答 yes。**拓扑监督（5 维）相对 full-descriptor 监督（23 维）没有带来局部敏感性增量**（捷径率 0.280 vs 0.253，CI 重叠）。详见 §12。
 - 因此：**MoNuSeg 上反事实头有明确的小幅视觉信号**（0.611 vs geometry 0.467；expand 0.722）；**PanNuke 的视觉增量未证实**（0.588 vs geometry 0.577，只差 1 pt；600 步只有 blank，没有 geometry 对照）。expand 在三个 seed 上稳定（0.72–0.75），但仍要警惕它是较容易的编辑类型，不能单独当作“模型看懂了拓扑”的证据。**结构头在连通性/持久性维（`h0_sum`、`n_comp`、`h0_max`）上有弱但可测的信号，但在零膨胀的 `hole_area_frac` 维上没有学会；旧五维平均 R² 被这一维支配，不能作为“结构头整体失败”的证据**；P2 下游迁移和 LM yes/no 读出仍未证明。
 
 ---
@@ -247,7 +248,7 @@ Held-out（60 cf；14 患者；final 150 步）：
 
 ## 5. 下一步（按优先级）
 
-1. **先跑错框对照（已有脚本/数据）**：`data/real/monuseg_test/cf_bal_wrongbox.jsonl` 已生成 50 条“挪框后真值 no”样本；用现有 topo adapter 跑 `eval_heads.py`，再跑 `analyze_wrongbox.py`，看 `wrongbox_yes_rate`（捷径率）和 `flip_no_rate`（正确翻 no 的比例）。这比再加一个训练 seed 更能判断 cf 头的 0.60 是不是在看局部。
+1. **错框对照（已完成，2026-10-25，见 §12）**：6 个 adapter（topo-only 5 维 vs full-descriptor 23 维，各 3 seeds）在 50 条 wrong-box 上评估。两组的正确翻转率均值都是 0.712；捷径率 topo 0.280 vs full 0.253，差异在噪声内——**没有证据表明拓扑监督提高了局部敏感性**。下一步不是再加 seed，而是重设计零膨胀目标（§12.5）。
 2. **重写结构目标**：regional block 已证明不是主因；对零膨胀的 `hole_area_frac`/H1 用 **hurdle 分解**（presence BCE + 正样本 Huber）或 TopoSlide 式 **持久性直方图 + CDF + 分零/非零 loss**；报告 presence AUC、正样本 MAE/Spearman，而不是只看五维平均 R²。
 3. **P2 用真实下游标签**：DHMC 生长模式（143 WSI，5 类）patch 采样 + 多数投票/MIL；先跑 A0（no-aux）vs A1（structure-on-growth），目标方向性 +2 pt；注意 143 张 slide 对 2 pt 功效不足，需合并罕见类或加外部数据。详见 `docs/P2_TOPOLOGY_PLAN.md`。
 4. **扩真实数据/重定义任务**：PanNuke 600 步已试，收益仅 +1.2 pt；下一步增加 patch/患者数，并重做 cf 任务难度（translate/collapse 尤其弱）。所有结果报告 patient/tissue 级 CI。
@@ -642,3 +643,131 @@ python scripts/eval/diagnose_structure.py \
 - 完整计划：`docs/P2_TOPOLOGY_PLAN.md`
 - 相关代码：TopoSlide <https://github.com/plevritis-lab/TopoSlide>、PMIL <https://github.com/ahmadobeid/PMIL>、TG-HEM <https://github.com/caki35/TGHEM>、GeoTop <https://github.com/MorillaLab/GeoTop>、DHMC <https://bmirds.github.io/LungCancer/>、DeepSlide <https://github.com/BMIRDS/deepslide>。
 - 当前分支：`research/topology-diagnostics`（基于 `origin/main`，已提交并推送到 origin，commit `faccb23`）；测试 **49 passed**。GitHub 分支：<https://github.com/LinKX-known/pathstruct-24g/tree/research/topology-diagnostics>
+
+---
+
+## 12. 2026-10-25 GPU 第一批：错框对照与逐维诊断复算
+
+> 本轮只使用已有数据与 adapter，不训练新模型。GPU：RTX 4090 D；6 个 adapter × 50 条 wrong-box；所有评估 0 skipped / 0 grid fallback。
+
+### 12.1 错框对照：模型是否真的看框内局部结构？
+
+数据：`data/real/monuseg_test/cf_bal_wrongbox.jsonl`，50 条同图挪框、挪框后真值全为 `no`（22 条原 yes→挪框 no，28 条原 no→挪框 no；translate 28 / expand 20 / collapse 2）。配对按 `source_ex_id`，CI 为按患者分组的 bootstrap（5000 次）。
+
+| arm | seed | 原 yes 率 | 挪框后 yes 率 [95% CI] | 正确翻 no [95% CI] | both-no 仍 yes | logit drop |
+|---|---|---|---|---|---|---|
+| topo 5 维 | 0 | 0.682 | 0.320 [0.20, 0.45] | 0.727 [0.52, 0.91] | 0.357 | 2.75 |
+| topo 5 维 | 1 | 0.500 | 0.200 [0.08, 0.35] | 0.727 [0.55, 0.88] | 0.143 | 2.10 |
+| topo 5 维 | 2 | 0.727 | 0.320 [0.16, 0.48] | 0.682 [0.52, 0.84] | 0.321 | 2.75 |
+| full 23 维 | 0 | 0.682 | 0.220 [0.11, 0.34] | 0.727 [0.50, 0.91] | 0.179 | 3.08 |
+| full 23 维 | 1 | 0.682 | 0.200 [0.08, 0.33] | 0.818 [0.64, 0.96] | 0.214 | 2.43 |
+| full 23 维 | 2 | 0.727 | 0.340 [0.22, 0.47] | 0.591 [0.38, 0.79] | 0.286 | 2.85 |
+
+按 kind 分层（正确翻 no 率；括号内为该子集的 n）：
+
+- topo：expand 0.62 / 1.00 / 0.75（n=8），translate 0.79 / 0.57 / 0.64（n=14）；
+- full：expand 0.75 / 0.88 / 0.62（n=8），translate 0.71 / 0.79 / 0.57（n=14）；
+- collapse 只有 2 条，两组均无“原 yes”样本，**不作解释**。
+
+**解读**：
+
+1. **模型不是纯全局先验**：22 条原 yes 中约 **71%** 在框移动后正确翻成 no，且 logit 明显下降（2.1–3.1）。这说明 cf 的 0.59–0.61 至少部分来自框内局部证据。
+2. **但局部敏感性并不干净**：仍有 27–32% 的原 yes 保持 yes；28 条 both-no 行中 22–36% 错误答 yes。这部分无法用“看懂了框内结构”解释。
+3. **拓扑监督没有带来增量**：topo 与 full 两组的平均正确翻转率都是 **0.712**；捷径率 topo 0.280 vs full 0.253、both-no yes 率 0.274 vs 0.226，差异在 bootstrap CI 内，且逐 seed 方向不一致。**不能说 5 维拓扑监督让反事实头更依赖局部结构。**
+4. 本对照只能证明“框位置有影响”；它不能区分“看局部细胞结构”和“看局部纹理/密度”。wrong-box 的真值全为 no，因此 `wrongbox_yes_rate` 混合了捷径与普通假阳性，报告时以 `flip_no_rate` 为主、`both_no_yes_rate` 单列。
+
+### 12.2 逐维诊断复算（与训练均值基线并列）
+
+逐维指标定义见 `src/pilot/structure_eval.py`；`R2(mean)` 是常数训练均值预测器的 R²，`MAE/mean` 是模型 MAE 相对该基线的倍数，`presence AUC` 只在零膨胀维上报告。所有 `heads_*.json` 都用对应训练集 `--train-data` 复算。
+
+**MoNuSeg，topo 5 维，3 个 final seed 的均值：**
+
+| dim | R² | R²(mean) | MAE/mean | Spearman | zero% | presence AUC |
+|---|---|---|---|---|---|---|
+| n_comp | +0.029 | −0.033 | 0.90 | 0.338 | 0 | — |
+| hole_count | −0.071 | −0.002 | 0.89 | −0.109 | 93 | 0.374 |
+| hole_area_frac | −175.8 | −0.027 | 17.08 | −0.116 | 87 | 0.401 |
+| h0_max | +0.047 | −0.012 | 0.89 | 0.399 | 0 | — |
+| h0_sum | −0.255 | −0.333 | 0.93 | 0.446 | 0 | — |
+
+**PanNuke，600 步 topo 5 维，seed 0：**
+
+| dim | R² | R²(mean) | MAE/mean | Spearman | zero% | presence AUC |
+|---|---|---|---|---|---|---|
+| n_comp | −0.024 | −0.167 | 0.91 | 0.348 | 0 | — |
+| hole_count | +0.007 | −0.013 | 1.41 | 0.114 | 96 | 0.674 |
+| hole_area_frac | −31.2 | −0.019 | 23.02 | −0.021 | 93 | 0.477 |
+| h0_max | −0.106 | −0.243 | 0.95 | 0.345 | 0 | — |
+| h0_sum | **+0.520** | −0.166 | **0.60** | **0.709** | 0 | — |
+
+**full-descriptor 头（前 5 维，其余维省略）：**
+
+| cohort | n_comp R² | h0_sum R² | h0_sum ρ | 非退化维 mean R² | 非退化维 ρ | 非退化维 MAE/mean |
+|---|---|---|---|---|---|---|
+| MoNuSeg full 23 维（3 seeds） | +0.005 | −0.300 | 0.296 | −1.826 | 0.005 | 1.52 |
+| PanNuke full 59 维（2 seeds） | −0.086 | +0.282 | 0.571 | −0.055 | 0.242 | 0.97 |
+| MoNuSeg topo 5 维（3 seeds） | +0.029 | −0.255 | 0.446 | −0.060 | 0.394 | 0.91 |
+| PanNuke600 topo 5 维（1 seed） | −0.024 | +0.520 | 0.709 | +0.130 | 0.467 | 0.91 |
+
+**解读**：
+
+1. 之前的结论被复算确认：**`hole_area_frac` 确实失败**（R² 大负、presence AUC 0.40–0.48、MAE 是均值预测的 17–23 倍），`hole_count` 的 presence 也基本没学会（MoNuSeg AUC 0.374；PanNuke 0.674 仅略高于随机）。
+2. **`h0_sum` 在 PanNuke 上有真实信号**（R² +0.52、ρ 0.71、MAE 0.60×），MoNuSeg 上只有弱 Spearman（0.45）而 R² 仍负；`n_comp`/`h0_max` 有一致的弱 Spearman（0.33–0.40）。
+3. **full-descriptor 头并不更好**：MoNuSeg 的非退化维 mean R² 为 −1.83（被其余 18 个描述子维拖垮），PanNuke 为 −0.055；在 topology 5 维上也没有超过 topo-only（PanNuke `h0_sum` +0.28 vs +0.52）。**把结构头收窄到 5 维拓扑目标是有依据的，不是信息损失。**
+4. bootstrap（按患者分组）确认 cf 的视觉增量：topo 3 seeds 的 real−blank 分别为 +0.150 [0.085, 0.222]、+0.050 [−0.136, 0.217]、+0.117 [0.000, 0.226]；与之前“seed 1 不稳定”的判断一致。
+
+### 12.3 本轮代码改动
+
+- `scripts/eval/eval_heads.py`：输出行保留 `source_ex_id` / `original_changed`，否则 `analyze_wrongbox.py` 无法把挪框预测配回原框预测。这是纯 provenance 修复，不改变任何指标。
+- 新增结果文件：`out/heads_wrongbox_{topo_real,real}_s{0,1,2}.json`、`out/metrics_wrongbox_*.json`、`out/wrongbox_analysis_{topo,full}_s{0,1,2}.json`、`out/structure_diagnostics_{monuseg_full23,monuseg_topo5,pannuke_full59,pannuke600_topo5}.json`、`out/bootstrap_topo_s{0,1,2}.json`。
+
+### 12.4 对结论的更新
+
+- **成立**：cf 头部分依赖框内局部证据（约 71% 正确翻转）；结构头在 `h0_sum`/`n_comp`/`h0_max` 上有弱但可测信号；`hole_area_frac`/`hole_count` 的连续回归失败。
+- **不成立**：拓扑监督（5 维）提高反事实局部敏感性——wrong-box 上没有增量；full-descriptor 结构监督修复 topology 回归——没有，反而更差。
+- **下一步**：按 §5.2 重设计零膨胀目标（hurdle：presence BCE + 正样本 Huber），先在 MoNuSeg/PanNuke 单 seed 验证 presence AUC / 正样本 MAE 是否改善；不要把 wrong-box 的 71% 翻转率当作“拓扑监督有效”的证据。
+
+### 12.5 复现命令（本轮）
+
+```bash
+# 6 个 adapter × 50 条 wrong-box
+for s in 0 1 2; do
+  # topo-only (5 维)
+  python scripts/eval/eval_heads.py \
+    --adapter "out/p1_real_topo_s$s" \
+    --data data/real/monuseg_test/cf_bal_wrongbox.jsonl \
+    --train-data data/real/monuseg_train/cf_train_bal.jsonl \
+    --preset 4b_bf16_1024 \
+    --out "out/heads_wrongbox_topo_real_s$s.json" \
+    --metrics-out "out/metrics_wrongbox_topo_real_s$s.json"
+  python scripts/eval/analyze_wrongbox.py \
+    --real "out/heads_topo_real_s$s.json" \
+    --wrongbox "out/heads_wrongbox_topo_real_s$s.json" \
+    --out "out/wrongbox_analysis_topo_s$s.json"
+  # full-descriptor (23 维)
+  python scripts/eval/eval_heads.py \
+    --adapter "out/p1_real_s$s" \
+    --data data/real/monuseg_test/cf_bal_wrongbox.jsonl \
+    --train-data data/real/monuseg_train/cf_train_bal.jsonl \
+    --preset 4b_bf16_1024 \
+    --out "out/heads_wrongbox_real_s$s.json" \
+    --metrics-out "out/metrics_wrongbox_real_s$s.json"
+  python scripts/eval/analyze_wrongbox.py \
+    --real "out/heads_real_s$s.json" \
+    --wrongbox "out/heads_wrongbox_real_s$s.json" \
+    --out "out/wrongbox_analysis_full_s$s.json"
+done
+
+# 逐维诊断
+python scripts/eval/diagnose_structure.py \
+  --pred out/heads_topo_real_s0.json --train-data data/real/monuseg_train/cf_train_bal.jsonl \
+  --dims 5 --out out/structure_diagnostics_monuseg_topo5.json
+python scripts/eval/diagnose_structure.py \
+  --pred out/heads_pannuke600_real_s0.json --train-data data/real/pannuke_train/cf_train_bal.jsonl \
+  --dims 5 --out out/structure_diagnostics_pannuke600_topo5.json
+
+# 分组 bootstrap
+python scripts/eval/bootstrap_heads.py --real out/heads_topo_real_s0.json \
+  --blank out/heads_topo_blank_s0.json \
+  --train-data data/real/monuseg_train/cf_train_bal.jsonl --out out/bootstrap_topo_s0.json
+```

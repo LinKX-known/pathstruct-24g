@@ -135,6 +135,10 @@ def main() -> int:
             records.append(
                 {
                     "ex_id": ex.get("ex_id", ""),
+                    # Provenance for derived controls (e.g. the wrong-box set);
+                    # analyze_wrongbox.py pairs shifted rows back by this id.
+                    "source_ex_id": ex.get("source_ex_id", ""),
+                    "original_changed": ex.get("original_changed"),
                     "roi_id": ex.get("roi_id", ""),
                     "patient_id": ex.get("patient_id", ""),
                     "wsi_id": ex.get("wsi_id", ""),
