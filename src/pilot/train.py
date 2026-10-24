@@ -7,12 +7,15 @@ is optional, which gives the LoRA-only baseline for free.
 
 from __future__ import annotations
 
+import json
 import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence
 
 import numpy as np
+
+from .hurdle import positive_class_weights, zero_inflated_dims
 
 
 @dataclass
@@ -29,6 +32,11 @@ class TrainConfig:
     # hole_count, hole_area_frac, h0_max, h0_sum). The 3x3 regional block was
     # consistently unlearned on real data and diluted the topology loss.
     structure_dims: int = 0
+    # Hurdle decomposition for zero-inflated dims (hole_count, hole_area_frac):
+    # a presence BCE plus a positive-only smooth-L1, instead of one regression
+    # that is dominated by the zero spike.
+    structure_hurdle: bool = False
+    hurdle_zero_threshold: float = 0.5
     # P2: supervise the structure head on downstream (growth/tissue) examples
     # too, not only on counterfactual examples. This is what makes topology a
     # shared representation for the downstream task instead of a side task.
@@ -188,11 +196,43 @@ def run(
         raise ValueError(
             f"structure_dims={s_dims} exceeds descriptor length {n_desc}"
         )
+    # Hurdle dims are chosen on the training descriptors only; the eval side
+    # reads the same list back from structure_hurdle.json.
+    desc_pool = [
+        r["descriptor"]
+        for r in list(cf) + list(growth)
+        if r.get("descriptor") and len(r["descriptor"]) >= s_dims
+    ]
+    hurdle_dims: List[int] = []
+    hurdle_zero_frac = [0.0] * s_dims
+    hurdle_pos_weight: List[float] = []
+    if cfg.structure_hurdle:
+        hurdle_dims, hurdle_zero_frac = zero_inflated_dims(
+            desc_pool, s_dims, cfg.hurdle_zero_threshold
+        )
+        hurdle_pos_weight = positive_class_weights(desc_pool, hurdle_dims)
     heads = (
-        build_heads(d_model, max(s_dims, 1), hidden=1024).to(device)
+        build_heads(
+            d_model,
+            max(s_dims, 1),
+            hidden=1024,
+            presence_dims=len(hurdle_dims),
+        ).to(device)
         if (use_aux and (cf or has_growth_desc))
         else None
     )
+    if cfg.structure_hurdle:
+        hurdle_cfg = {
+            "dims": s_dims,
+            "hurdle_dims": hurdle_dims,
+            "zero_fraction": hurdle_zero_frac,
+            "pos_weight": hurdle_pos_weight,
+            "zero_threshold": cfg.hurdle_zero_threshold,
+        }
+        Path(cfg.save_dir).mkdir(parents=True, exist_ok=True)
+        (Path(cfg.save_dir) / "structure_hurdle.json").write_text(
+            json.dumps(hurdle_cfg, indent=2), encoding="utf-8"
+        )
 
     params = [p for p in model.parameters() if p.requires_grad]
     if heads is not None:
@@ -282,11 +322,40 @@ def run(
                 if grid is not None:
                     desc, changed, feats = (t.to(device) for t in collate_aux(ex))
                     if need_structure and desc.shape[1] >= s_dims:
-                        s_pred = heads["structure"](grid)
+                        s_out = heads["structure"](grid)
+                        reg_pred = s_out[:, :s_dims]
                         # Topology-only mode drops the 3x3 regional block, which
                         # had negative R^2 on both real cohorts.
-                        target = torch.log1p(desc[:, :s_dims].clamp(min=0.0))
-                        l_s = smooth_l1(s_pred, target)
+                        raw = desc[:, :s_dims].clamp(min=0.0)
+                        target = torch.log1p(raw)
+                        if hurdle_dims:
+                            pres_pred = s_out[:, s_dims:]
+                            non_h = [i for i in range(s_dims) if i not in hurdle_dims]
+                            parts = []
+                            if non_h:
+                                parts.append(smooth_l1(reg_pred[:, non_h], target[:, non_h]))
+                            h = torch.as_tensor(
+                                hurdle_dims, device=desc.device, dtype=torch.long
+                            )
+                            pos = raw.index_select(1, h) > 0
+                            pw = torch.as_tensor(
+                                hurdle_pos_weight,
+                                device=desc.device,
+                                dtype=pres_pred.dtype,
+                            )
+                            l_pres = torch.nn.functional.binary_cross_entropy_with_logits(
+                                pres_pred, pos.to(pres_pred.dtype), pos_weight=pw
+                            )
+                            if bool(pos.any()):
+                                l_pos = smooth_l1(
+                                    reg_pred.index_select(1, h)[pos],
+                                    target.index_select(1, h)[pos],
+                                )
+                            else:
+                                l_pos = pres_pred.sum() * 0.0
+                            l_s = sum(parts) + l_pres + l_pos
+                        else:
+                            l_s = smooth_l1(reg_pred, target)
                         lam_s = cfg.lam_structure if is_cf else cfg.lam_structure_growth
                         loss = loss + lam_s * l_s / cfg.grad_accum
                         logs["struct"] = logs.get("struct", 0.0) + float(l_s.detach())
@@ -343,6 +412,11 @@ def run(
             model.save_pretrained(ckpt)
             if heads is not None:
                 torch.save(heads.state_dict(), ckpt / "aux_heads.pt")
+            if cfg.structure_hurdle:
+                (ckpt / "structure_hurdle.json").write_text(
+                    (save_dir / "structure_hurdle.json").read_text(encoding="utf-8"),
+                    encoding="utf-8",
+                )
             print(f"           checkpoint {ckpt}", flush=True)
 
     model.save_pretrained(save_dir)

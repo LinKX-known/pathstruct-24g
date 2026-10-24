@@ -35,6 +35,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[2] / "src"))
 
 from pilot.data import read_jsonl  # noqa: E402
 from pilot.heads import build_heads, grid_or_global_mean  # noqa: E402
+from pilot.hurdle import expected_log1p  # noqa: E402
 from pilot.model import ModelConfig, image_token_id, load_model  # noqa: E402
 from pilot.structure_eval import (  # noqa: E402
     format_table,
@@ -93,8 +94,25 @@ def main() -> int:
         for k, v in state.items()
         if k.startswith("structure.net.") and k.endswith(".weight") and v.dim() == 2
     ]
-    s_dim = int(state[weight_keys[-1]].shape[0]) if weight_keys else n_desc
-    heads = build_heads(d_model, s_dim, hidden=args.hidden).to(device)
+    out_width = int(state[weight_keys[-1]].shape[0]) if weight_keys else n_desc
+    # Hurdle runs store the regression width and the extra presence logits in
+    # structure_hurdle.json next to aux_heads.pt.
+    hurdle_cfg_path = Path(args.adapter) / "structure_hurdle.json"
+    hurdle_dims: list[int] = []
+    if hurdle_cfg_path.exists():
+        hurdle_cfg = json.loads(hurdle_cfg_path.read_text(encoding="utf-8"))
+        s_dim = int(hurdle_cfg["dims"])
+        hurdle_dims = [int(i) for i in hurdle_cfg.get("hurdle_dims", [])]
+        if out_width != s_dim + len(hurdle_dims):
+            raise SystemExit(
+                f"structure head width {out_width} does not match "
+                f"dims={s_dim} + presence={len(hurdle_dims)} in {hurdle_cfg_path}"
+            )
+    else:
+        s_dim = out_width
+    heads = build_heads(
+        d_model, s_dim, hidden=args.hidden, presence_dims=len(hurdle_dims)
+    ).to(device)
     heads.load_state_dict(state)
     heads.eval()
 
@@ -129,29 +147,39 @@ def main() -> int:
                 grid_fallbacks += 1
             desc, changed, feats = (t.to(device) for t in collate_aux(ex))
             logit = float(heads["cf"](grid, feats).reshape(-1)[0])
-            s = heads["structure"](grid).reshape(-1).cpu()
+            s_all = heads["structure"](grid).reshape(-1)
+            s_reg = s_all[:s_dim].cpu().numpy()
+            if hurdle_dims:
+                s_pres = torch.sigmoid(s_all[s_dim:]).cpu().numpy()
+                s = expected_log1p(s_reg, s_pres, hurdle_dims)
+            else:
+                s_pres = np.zeros(0, dtype=np.float64)
+                s = s_reg
             logits.append(logit)
             s_pred.append(s)
-            records.append(
-                {
-                    "ex_id": ex.get("ex_id", ""),
-                    # Provenance for derived controls (e.g. the wrong-box set);
-                    # analyze_wrongbox.py pairs shifted rows back by this id.
-                    "source_ex_id": ex.get("source_ex_id", ""),
-                    "original_changed": ex.get("original_changed"),
-                    "roi_id": ex.get("roi_id", ""),
-                    "patient_id": ex.get("patient_id", ""),
-                    "wsi_id": ex.get("wsi_id", ""),
-                    "kind": ex.get("kind", ""),
-                    "changed": int(ex["changed"]),
-                    "logit": logit,
-                    "pred": int(logit > 0),
-                    "correct": int((logit > 0) == bool(ex["changed"])),
-                    "grid_fallback": grid_status == "fallback",
-                    "s_pred": s.tolist(),
-                    "descriptor": ex["descriptor"],
-                }
-            )
+            rec = {
+                "ex_id": ex.get("ex_id", ""),
+                # Provenance for derived controls (e.g. the wrong-box set);
+                # analyze_wrongbox.py pairs shifted rows back by this id.
+                "source_ex_id": ex.get("source_ex_id", ""),
+                "original_changed": ex.get("original_changed"),
+                "roi_id": ex.get("roi_id", ""),
+                "patient_id": ex.get("patient_id", ""),
+                "wsi_id": ex.get("wsi_id", ""),
+                "kind": ex.get("kind", ""),
+                "changed": int(ex["changed"]),
+                "logit": logit,
+                "pred": int(logit > 0),
+                "correct": int((logit > 0) == bool(ex["changed"])),
+                "grid_fallback": grid_status == "fallback",
+                "s_pred": s.tolist(),
+                "descriptor": ex["descriptor"],
+            }
+            if hurdle_dims:
+                rec["s_reg"] = s_reg.tolist()
+                rec["s_presence"] = s_pres.tolist()
+                rec["hurdle_dims"] = list(hurdle_dims)
+            records.append(rec)
         labels.append(int(ex["changed"]))
         kinds.append(ex["kind"])
         desc_true.append(np.asarray(ex["descriptor"], dtype=np.float64))
@@ -192,7 +220,7 @@ def main() -> int:
         )
 
     true = np.stack(desc_true)
-    pred_desc = np.stack([p.numpy() for p in s_pred])
+    pred_desc = np.stack([np.asarray(p) for p in s_pred])
     target = log1p_target(true, s_dim)
     keep = min(pred_desc.shape[1], target.shape[1])
     target, pred_desc = target[:, :keep], pred_desc[:, :keep]

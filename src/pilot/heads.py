@@ -95,15 +95,20 @@ if HAS_TORCH:
             hidden: int = 1024,
             dropout: float = 0.1,
             proj_dim: int = 256,
+            presence_dims: int = 0,
         ):
             super().__init__()
+            self.n_desc = int(n_desc)
+            self.presence_dims = int(presence_dims)
             self.proj = nn.Conv2d(d_model, proj_dim, kernel_size=1)
             self.net = nn.Sequential(
                 nn.LayerNorm(proj_dim * GRID_OUT * GRID_OUT),
                 nn.Linear(proj_dim * GRID_OUT * GRID_OUT, hidden),
                 nn.GELU(),
                 nn.Dropout(dropout),
-                nn.Linear(hidden, n_desc),
+                # First n_desc outputs are log1p-space regressions; the extra
+                # presence_dims are presence logits for the zero-inflated dims.
+                nn.Linear(hidden, n_desc + presence_dims),
             )
 
         def forward(self, grid):
@@ -169,10 +174,17 @@ if HAS_TORCH:
             h = self.fuse(torch.cat([region.unsqueeze(0), self.mask(mask_feats)], dim=-1))
             return self.cls(h).squeeze(-1)
 
-    def build_heads(d_model: int, n_desc: int, hidden: int = 1024):
+    def build_heads(
+        d_model: int,
+        n_desc: int,
+        hidden: int = 1024,
+        presence_dims: int = 0,
+    ):
         return nn.ModuleDict(
             {
-                "structure": StructureHead(d_model, n_desc, hidden),
+                "structure": StructureHead(
+                    d_model, n_desc, hidden, presence_dims=presence_dims
+                ),
                 "cf": CounterfactualHead(d_model, max(128, hidden // 2)),
             }
         )

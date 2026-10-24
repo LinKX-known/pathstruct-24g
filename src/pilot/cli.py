@@ -199,6 +199,7 @@ def cmd_train(args) -> int:
         checkpoint_every=args.checkpoint_every,
         seed=args.seed,
         structure_dims=args.structure_dims,
+        structure_hurdle=args.structure_hurdle,
     )
     run(
         model,
@@ -486,6 +487,12 @@ def build_parser() -> argparse.ArgumentParser:
         type=int,
         default=0,
         help="0=full descriptor; 5=topology block only (drop 3x3 regional)",
+    )
+    tr.add_argument(
+        "--structure-hurdle",
+        dest="structure_hurdle",
+        action="store_true",
+        help="presence BCE + positive-only Huber for zero-inflated dims",
     )
 
     ev = sub.choices["eval"]
