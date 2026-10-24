@@ -97,6 +97,41 @@ def main() -> int:
         "hurdle_dims": hurdle_dims,
         "dims": {},
     }
+
+    def expected_mae(rows, dim, key):
+        vals = [
+            abs(float(r[key][dim]) - np.log1p(float(r["descriptor"][dim]))) for r in rows
+        ]
+        return float(np.mean(vals))
+
+    for dim in [i for i in range(args.dims) if i not in hurdle_dims]:
+        boot = []
+        for _ in range(args.n_boot):
+            pick = rng.choice(uniq, len(uniq), replace=True)
+            idx = np.concatenate([members[g] for g in pick])
+            o = [pairs[i][0] for i in idx]
+            n = [pairs[i][1] for i in idx]
+            boot.append((expected_mae(o, dim, "s_pred"), expected_mae(n, dim, "s_pred")))
+        a = np.asarray(boot, dtype=float)
+        delta = a[:, 1] - a[:, 0]
+
+        def dense_ci(x):
+            x = np.asarray(x, dtype=float)
+            x = x[np.isfinite(x)]
+            return [float(v) for v in np.percentile(x, [2.5, 97.5])] if len(x) else [float("nan")] * 2
+
+        result["dims"][str(dim)] = {
+            "kind": "dense",
+            "old_expected_mae": float(np.nanmean(a[:, 0])),
+            "new_expected_mae": float(np.nanmean(a[:, 1])),
+            "delta_expected_mae": float(np.nanmean(delta)),
+            "ci": {
+                "old_expected_mae": dense_ci(a[:, 0]),
+                "new_expected_mae": dense_ci(a[:, 1]),
+                "delta_expected_mae": dense_ci(delta),
+            },
+        }
+
     for dim in hurdle_dims:
         boot = []
         for _ in range(args.n_boot):
@@ -114,6 +149,7 @@ def main() -> int:
             return [float(v) for v in np.percentile(x, [2.5, 97.5])] if len(x) else [float("nan")] * 2
 
         result["dims"][str(dim)] = {
+            "kind": "hurdle",
             "old_presence_auc": float(np.nanmean(a[:, 0])),
             "new_presence_auc": float(np.nanmean(a[:, 1])),
             "delta_presence_auc": float(np.nanmean(delta_auc)),
