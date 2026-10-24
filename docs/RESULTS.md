@@ -16,7 +16,7 @@
 - 真实 H&E（PanNuke）：反事实头 2 个 seed 为 0.595/0.582（mean **0.588**），blank 0.530，但 box-geometry 0.577——**只高约 1 pt，视觉增量未证实**；训练 loss 停在 0.5–0.8（underfit，1.3 epochs），0.588 是下界；结构头旧五维平均 R² 为负（由 `hole_area_frac` 驱动；非退化维 mean R² +0.13、`h0_sum` R² +0.52）。
 - **扩展到 600 步 + topology-only（2026-10-22）**：PanNuke cf **0.600**（blank 0.547，real−blank +5.3 pt，CI [0.5, 10.9]），仅比 300 步高 1.2 pt；MoNuSeg 3 seeds mean **0.594**（full descriptor 0.611），blank 0.489，expand 0.750。两组的结构 topo R² 仍为负；去掉 3×3 regional block 没有修复结构回归。
 - **错框对照（2026-10-25）**：模型确实部分依赖框内局部信息——22 条“原 yes→挪框后 no”中 **71.2%** 正确翻成 no（两个 arm 的均值相同），但仍有 27–32% 保持 yes、22–36% 的 both-no 行错误答 yes。**拓扑监督（5 维）相对 full-descriptor 监督（23 维）没有带来局部敏感性增量**（捷径率 0.280 vs 0.253，CI 重叠）。详见 §12。
-- **Hurdle 目标 pilot（2026-10-25）**：presence 分支有效——MoNuSeg `hole_area_frac` presence AUC 三个 seed 从 0.20–0.60 升到 **0.85–0.89**，PanNuke `hole_count` 0.674→**0.834**、正样本 MAE/mean 6.73→1.30；但 dense 维一致退化，`h0_sum` expected MAE 在 MoNuSeg 三个 seed 全部显著变差（+0.16 到 +0.22），PanNuke R² 0.52→0.27。**naive hurdle 不是净收益，不能写“结构头已修复”**；详见 §13。
+- **Hurdle 目标 pilot（2026-10-25）**：presence 分支有效——MoNuSeg `hole_area_frac` presence AUC 三个 seed 从 0.20–0.60 升到 **0.85–0.89**，PanNuke `hole_count` 0.674→**0.834/0.814**（seed 0/1）、正样本 MAE/mean 6.73→**1.30/1.62**；但 dense 维一致退化，`h0_sum` expected MAE 在 MoNuSeg 三个 seed 全部显著变差（+0.16 到 +0.22），PanNuke R² 0.52→0.27/0.23。**naive hurdle 不是净收益，不能写“结构头已修复”**；详见 §13。
 - 因此：**MoNuSeg 上反事实头有明确的小幅视觉信号**（0.611 vs geometry 0.467；expand 0.722）；**PanNuke 的视觉增量未证实**（0.588 vs geometry 0.577，只差 1 pt；600 步只有 blank，没有 geometry 对照）。expand 在三个 seed 上稳定（0.72–0.75），但仍要警惕它是较容易的编辑类型，不能单独当作“模型看懂了拓扑”的证据。**结构头在连通性/持久性维（`h0_sum`、`n_comp`、`h0_max`）上有弱但可测的信号，但在零膨胀的 `hole_area_frac` 维上没有学会；旧五维平均 R² 被这一维支配，不能作为“结构头整体失败”的证据**；P2 下游迁移和 LM yes/no 读出仍未证明。
 
 ---
@@ -817,7 +817,7 @@ MoNuSeg 的 presence 指标只有 4/8 个正样本，任何单 seed AUC 都极�
 - `h0_sum` 的 expected MAE Δ 为 **+0.219 [+0.09, +0.33]、+0.164 [+0.03, +0.29]、+0.190 [+0.08, +0.30]**——三个 seed 全部显著退化。
 - `h0_max` ΔMAE 为 +0.003、+0.027、−0.005，方向不一致。
 
-### 13.4 PanNuke（seed 0，600 步）
+### 13.4 PanNuke（seed 0/1，600 步）
 
 | dim | presence AUC 旧 → hurdle | 正样本 MAE/mean 旧 → hurdle | expected R² 旧 → hurdle | expected MAE/mean 旧 → hurdle |
 |---|---|---|---|---|
@@ -833,13 +833,15 @@ MoNuSeg 的 presence 指标只有 4/8 个正样本，任何单 seed AUC 都极�
 - `hole_area_frac`：presence AUC Δ +0.095 [−0.31, +0.53]（不显著）；正样本 MAE Δ **+0.129 [+0.09, +0.16]**——presence 可能略好，但幅值回归显著变差。
 - dense 维 expected MAE Δ：`h0_sum` **+0.045 [+0.015, +0.076]**、`h0_max` +0.011 [+0.002, +0.022]、`n_comp` +0.011 [−0.000, +0.019]。
 
+**Seed 1 复现（600 步）**：`hole_count` AUC **0.814**、正样本 MAE/mean **1.62**；`hole_area_frac` AUC **0.593**、正样本 MAE/mean **11.46**；`h0_sum` R² **0.232**、MAE/mean **0.77**。bootstrap：`hole_count` ΔAUC +0.182 [−0.02, +0.87]、Δ正样本 MAE −0.478 [−0.51, −0.24]；`hole_area` ΔAUC +0.114 [−0.23, +0.54]、Δ正样本 MAE **+0.070 [+0.05, +0.10]**；`h0_sum` ΔMAE **+0.052 [+0.02, +0.08]**。方向与 seed 0 完全一致。
+
 **检查点不是过拟合问题**：`h0_sum` R² 在 ck300/ck500 分别为 **0.303 / 0.288**，仍低于旧头 0.520；ck500 的 `hole_count` AUC 0.840、`hole_area` 0.592，与 final 接近。非 hurdle 维的退化在训练中段就存在，不是最后几步造成的。
 
 ### 13.5 结论
 
 **成立**：
 
-1. Hurdle 分解确实解决了“presence 学不会”的问题，至少在 `hole_area_frac` 上：MoNuSeg 3 seeds 的 presence AUC 从 0.20–0.60 提升到 **0.85–0.89**；PanNuke `hole_count` 从 0.674 提升到 **0.834**。
+1. Hurdle 分解确实解决了“presence 学不会”的问题，至少在 `hole_area_frac` 上：MoNuSeg 3 seeds 的 presence AUC 从 0.20–0.60 提升到 **0.85–0.89**；PanNuke `hole_count` 从 0.674 提升到 **0.834/0.814**（seed 0/1），`hole_area` 从 0.477 提升到 **0.587/0.593**。
 2. `hole_count` 的正样本幅值在 PanNuke 上大幅改善（MAE/mean **6.73 → 1.30**），MoNuSeg 也一致改善（20.5 → 13.8）。
 3. 零膨胀维的 expected-value MAE 明显下降（MoNuSeg `hole_area` 17.1 → 4.2；PanNuke 23.0 → 7.4），因为 presence 概率把大量零样本的预测压向 0。
 
