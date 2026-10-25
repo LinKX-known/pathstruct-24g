@@ -1,5 +1,10 @@
 """Turning ROI images into cell tables.
 
+**The classical backend here is a debug tool.** On real H&E it under-segments touching
+nuclei. For anything reported, run the official CellViT-Inference package
+(`pip install cellvit`) and convert with `scripts/data/run_cellvit.py`; see
+`docs/DEPENDENCIES.md` for the full list of what is borrowed and what is not.
+
 The topology descriptor needs one thing: where the nuclei are. This module
 produces that, with two routes:
 

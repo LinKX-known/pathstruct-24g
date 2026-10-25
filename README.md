@@ -170,21 +170,39 @@ is a single near-zero value the centre can fall just below it. `>` then marks th
 whole image as foreground. Four of the first 36 synthetic ROIs failed that way;
 the guard splits halfway between the background and the upper tail instead.
 
-**2. CellViT++ / HoVer-Net / StarDist (use for anything you report)**
+**2. CellViT++ (the supported way — do not hand-roll a segmenter)**
 
-Run their inference first (CellViT++ writes `{name}_cells.json` with a `centroid`
-and a `class` per nucleus), then convert:
+The maintained package is **CellViT-Inference** (`pip install cellvit`), documented at
+<https://tio-ikim.github.io/CellViT-Inference/>. Its CLI is config-driven:
+
+```bash
+cellvit-inference --config cellvit_config.yaml     # writes *_cells.json
+```
+
+`scripts/data/run_cellvit.py` calls that binary and converts its output into the cell
+tables this repo consumes:
+
+```bash
+python scripts/data/run_cellvit.py --config cellvit_config.yaml \
+  --json-dir out/cellvit --cells-out data/real/cells
+```
+
+If you already have the JSON, the converter alone is enough:
 
 ```bash
 pilot cells --json-dir cellvit_out --out data/real/cells
 ```
 
-That is a real bridge, not a stub: the parser tolerates the surrounding schema and
-only requires the centroid and class, so a HoVer-Net export shaped the same way also
-works. If your segmenter writes instance masks instead, use `pilot segment --backend mask`.
+The parser only requires a `centroid` and a `class` per nucleus, so a HoVer-Net export
+shaped the same way also works. If your segmenter writes instance masks instead, use
+`pilot segment --backend mask`.
 
-Whatever you pick, state it in the paper — the cell table is now an input to your
-result, not a given.
+**The bundled classical segmenter is a debug tool.** It exists so the pipeline runs on a
+laptop; it under-segments real H&E. Anything you intend to report must come from
+CellViT.
+
+Whatever you pick, state it in the paper — the cell table is an input to your result,
+not a given.
 
 ## One command
 
