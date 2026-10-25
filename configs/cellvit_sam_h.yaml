@@ -1,0 +1,29 @@
+# CellViT++ inference on a folder of ROI images.
+#
+# `model: SAM` selects CellViT-SAM-H, which is the CellViT++ model (the lighter
+# variant is `model: HIPT` = CellViT-HIPT-256). Both come from the same package:
+#
+#     pip install cellvit
+#     cellvit-inference --config configs/cellvit_sam_h.yaml
+#
+# Then convert the output for the rest of this repository:
+#
+#     python scripts/data/run_cellvit.py --config configs/cellvit_sam_h.yaml \
+#         --cells-out data/real/<name>/cells
+#
+# Notes
+# - `process_dataset` (not `process_wsi`) is the folder mode: our ROIs are ordinary
+#   images, not whole-slide pyramids.
+# - 512x512 patches at 20x are ~0.5 um/px. Set `wsi_mpp` to the real value if your
+#   ROIs were scanned differently; CellViT checks it against the network resolution.
+# - The package downloads its own weights on first use; do not point `model` at the
+#   basic CellViT ViT256 checkpoint, the nuclei vocabulary differs.
+
+model: SAM
+output_format:
+  outdir: out/cellvit/rois
+process_dataset:
+  wsi_folder: data/real/pannuke/images
+  wsi_extension: png
+  wsi_mpp: 0.5
+  wsi_magnification: 20

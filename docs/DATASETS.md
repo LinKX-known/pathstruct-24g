@@ -58,12 +58,18 @@ python scripts/data/import_monuseg.py --train-parquet data/raw/monuseg/train-*.p
   --test-parquet data/raw/monuseg/test-*.parquet --out data/real/monuseg
 ```
 
-Both write `manifest.csv` + `cells/{roi_id}.csv`. If the export already carries masks, you
-can skip CellViT; otherwise segment with the official package:
+Both write `manifest.csv` + `cells/{roi_id}.csv`. If the export already carries masks you
+can skip segmentation; otherwise use **CellViT++** through the official package. CellViT++
+is `model: SAM` (CellViT-SAM-H) in its config; `model: HIPT` is the lighter
+CellViT-HIPT-256 variant, and `model: ViT256` is the *older* basic CellViT, which this
+repository rejects because its nuclei vocabulary differs.
 
 ```bash
-python scripts/data/run_cellvit.py --config cellvit.yaml --json-dir out/cellvit --cells-out data/real/<name>/cells
+python scripts/data/run_cellvit.py --config configs/cellvit_sam_h.yaml \
+  --cells-out data/real/<name>/cells
 ```
+
+Edit `process_dataset.wsi_folder` in the config to point at your ROI images.
 
 ## Verification (run before every training job)
 

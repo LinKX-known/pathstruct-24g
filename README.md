@@ -194,8 +194,12 @@ The maintained package is **CellViT-Inference** (`pip install cellvit`), documen
 <https://tio-ikim.github.io/CellViT-Inference/>. Its CLI is config-driven:
 
 ```bash
-cellvit-inference --config cellvit_config.yaml     # writes *_cells.json
+cellvit-inference --config configs/cellvit_sam_h.yaml   # writes *_cells.json
 ```
+
+`configs/cellvit_sam_h.yaml` selects **CellViT++** (`model: SAM` = CellViT-SAM-H).
+`model: HIPT` is the lighter CellViT++ variant; `model: ViT256` is the older basic
+CellViT, and the wrapper rejects it rather than silently changing the nuclei vocabulary.
 
 `scripts/data/run_cellvit.py` calls that binary and converts its output into the cell
 tables this repo consumes:
