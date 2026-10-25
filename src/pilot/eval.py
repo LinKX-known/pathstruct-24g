@@ -123,10 +123,23 @@ def score(rows: Sequence[Dict[str, Any]]) -> Dict[str, float]:
         return {"n": 0}
     y = np.asarray([r["correct"] for r in rows], dtype=float)
     golds = np.asarray([r["gold"] for r in rows])
+    preds = np.asarray([r["pred"] or "__none__" for r in rows])
     per_class = {}
     for g in sorted(set(golds)):
         mask = golds == g
         per_class[g] = float(y[mask].mean())
+
+    # macro-F1 over the union of classes, so a class the model never predicts
+    # still contributes a zero instead of disappearing from the average
+    labels = sorted((set(golds) | set(preds)) - {"__none__"})  # parse failures are not a class
+    f1s = []
+    for c in labels:
+        tp = float(np.sum((golds == c) & (preds == c)))
+        fp = float(np.sum((golds != c) & (preds == c)))
+        fn = float(np.sum((golds == c) & (preds != c)))
+        prec = tp / (tp + fp) if (tp + fp) else 0.0
+        rec = tp / (tp + fn) if (tp + fn) else 0.0
+        f1s.append(2 * prec * rec / (prec + rec) if (prec + rec) else 0.0)
     per_kind = {}
     kinds = [str(r.get("kind", "")) for r in rows]
     if any(kinds):
@@ -143,6 +156,7 @@ def score(rows: Sequence[Dict[str, Any]]) -> Dict[str, float]:
         "n": int(len(y)),
         "accuracy": float(y.mean()),
         "balanced_accuracy": float(np.mean(list(per_class.values()))),
+        "macro_f1": float(np.mean(f1s)),
         "per_class": per_class,
         "per_kind": per_kind,
         "parse_failures": int(sum(1 for r in rows if not r["pred"])),

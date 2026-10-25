@@ -207,9 +207,16 @@ not a given.
 ## One command
 
 ```bash
-bash scripts/run_pilot.sh            # synthetic: segment -> doctor -> build -> P0 -> P1 -> P2
-DATA=real bash scripts/run_pilot.sh  # uses data/real/{manifest.csv,cells/}
+ROOT=data/real/pannuke bash scripts/run_real.sh     # real H&E only
+ROOT=data/real/monuseg bash scripts/run_real.sh
 ```
+
+It runs the two arms that decide the project on **real images**: A = LoRA-only on the
+diagnostic QA, B = evidence tokens + observation + answer. Same base model, same data,
+same steps; the only difference is the architecture. It stops if `pilot doctor` fails.
+
+`bash scripts/run_pilot.sh` is the **format check** (synthetic cohort, CI only). It
+proves the plumbing runs; it is not evidence about anything.
 
 It is idempotent (skips steps whose outputs exist; `FORCE=1` to redo), and it stops if
 `doctor` finds a problem. `PER_CLASS=24 VAL_FRAC=0.3` gives the 72-ROI cohort used
@@ -244,32 +251,40 @@ Two honest caveats about using these sets for *training* a segmenter:
   so PanNuke cannot validate the hole feature. MoNuSeg's 1000x1000 fields are the
   right scale for that, and its multi-organ content doubles as a domain check.
 
-## Run
+## Run (real H&E)
+
+Everything below assumes the real-data layout produced by the importers:
+
+```
+data/real/pannuke/
+  manifest_train.csv  manifest_val.csv
+  cells/{roi_id}.csv          # CellViT output, converted with `pilot cells`
+  growth_train.jsonl  growth_val.jsonl      # `pilot build`
+  cf_train_bal.jsonl                        # balanced counterfactuals
+```
 
 ```bash
-# 0. synthetic cohort: proves the pipeline without any real data
-pilot synth --out data/synth --per-class 24
-pilot segment --images data/synth/images --out data/synth/cells_seg --backend classical
-pilot build --manifest data/synth/manifest.csv --cells data/synth/cells_seg \
-  --out data/synth --per-roi 6 --val-frac 0.3
-# optional, recommended for a structural benchmark: add --min-affected 5
-# (empty boxes are always "no" and are a free shortcut; see docs/FEASIBILITY.md)
+# 0. check the cohort before spending GPU time
+pilot doctor --manifest data/real/pannuke/manifest_train.csv --cells data/real/pannuke/cells
 
-# 1. P0 — zero shot on held-out patients
-pilot p0 --data data/synth/cf_val.jsonl --preset 4b_bf16
+# 1. zero-shot, held-out patients / tissues
+pilot p0 --data data/real/pannuke/cf_val.jsonl --preset 4b_bf16_1024
 
-# 2. P1 — learn the counterfactual task, evaluate held-out patients
-pilot train --cf data/synth/cf_train.jsonl --steps 150 --preset 4b_bf16 --out out/p1
-pilot eval  --data data/synth/cf_val.jsonl --adapter out/p1 --preset 4b_bf16
+# 2. counterfactual head only (the feasibility question, already answered)
+pilot train --cf data/real/pannuke/cf_train_bal.jsonl --steps 300 \
+  --preset 4b_bf16_1024 --out out/p1
+pilot eval  --data data/real/pannuke/cf_val.jsonl --adapter out/p1 --preset 4b_bf16_1024
 
-# 3. P2 — aux vs the same data mix without aux (same steps, only the loss differs)
-pilot train --growth data/synth/growth_train.jsonl --cf data/synth/cf_train.jsonl \
-  --steps 300 --preset 4b_bf16 --out out/p2_aux
-pilot train --growth data/synth/growth_train.jsonl --cf data/synth/cf_train.jsonl \
-  --steps 300 --preset 4b_bf16 --out out/p2_lora --no-aux
-pilot eval  --data data/synth/growth_val.jsonl --adapter out/p2_aux  --out pred_aux.json
-pilot eval  --data data/synth/growth_val.jsonl --adapter out/p2_lora --out pred_lora.json --compare pred_aux.json
+# 3. the experiment that decides the project: diagnostic accuracy, two arms
+ROOT=data/real/pannuke bash scripts/run_real.sh
 ```
+
+`scripts/run_real.sh` runs arm A (LoRA-only) and arm B (evidence tokens) on the same
+data and steps, and prints macro-F1 for both.
+
+**Synthetic data is a CI fixture, not evidence.** `bash scripts/run_pilot.sh` exercises
+the plumbing on a generated cohort; no number from it belongs in a result.
+
 
 `pilot build` also writes the unsplit `growth.jsonl` / `cf.jsonl`; use those only
 for debugging. The split files are the ones the gates refer to.
