@@ -15,15 +15,33 @@ generated evidence: the model emits `<|struct|>` tokens, reports the observation
 and answers from it. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
 `scripts/train/train_structure_vlm.py`.
 
+## Datasets
+
+Four datasets, two roles: **PathoVernier** is the table we compare with ASPECT on,
+**DHMC-LUAD** is the downstream diagnostic task, and PanNuke / MoNuSeg provide real H&E
+with nuclei annotations. Sources, request procedures (DHMC's links expire in four hours,
+PathoVernier is gated), on-disk layout and split rules are in
+[`docs/DATASETS.md`](docs/DATASETS.md).
+
+```bash
+bash scripts/data/prepare_all.sh pannuke
+python scripts/data/check_dataset.py --manifest data/real/pannuke/manifest_train.csv \
+  --cells data/real/pannuke/cells
+```
+
+`check_dataset.py` exits non-zero on missing images, missing cell tables, tiny cell
+counts, label imbalance or a patient appearing in both splits — run it before every job.
+
 ## Repository layout
 
 | path | what |
 |---|---|
 | src/pilot/ | the pipeline: structures, interventions, dataset builders, heads, train loop, evaluation |
-| scripts/data/ | import MoNuSeg / PanNuke exports into manifest.csv + cells/ |
+| scripts/data/ | download checks, importers, DHMC tiler, CellViT runner, check_dataset.py, prepare_all.sh |
 | scripts/build/ | balance counterfactual sets by edit kind and label |
 | scripts/eval/ | evaluate trained heads, bootstrap confidence intervals, probe the structure signal |
 | scripts/controls/ | blank-box control generation |
+| docs/DATASETS.md | sources, request steps, on-disk layout, split rules |
 | docs/RESULTS.md | the feasibility report: numbers, controls, what failed and why |
 | docs/FEASIBILITY.md | full technical report, including the bugs that were found |
 | 	ests/ | 26 CPU tests: python -m unittest discover -s tests -t . |
