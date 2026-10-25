@@ -1,4 +1,10 @@
-"""A small, readable training loop for a 24 GB card.
+"""LEGACY: trains the auxiliary heads as side channels.
+
+Kept because the feasibility reports and ``scripts/eval/`` reference it. The
+evidence architecture -- topology generated as tokens and reported as an
+observation -- lives in :mod:`pilot.sft`; use that for anything new.
+
+A small, readable training loop for a 24 GB card.
 
 Two batches per optimiser step: one from the downstream task (growth pattern)
 and one from the counterfactual task (does the architecture change). The second

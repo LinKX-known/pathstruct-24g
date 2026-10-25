@@ -7,6 +7,14 @@ which stays the full method. Here we only ask one question:
 > On a single RTX 4090 (24 GB), does training a model to judge **structural changes**
 > move the needle, or is the idea dead?
 
+## Current direction
+
+The pilot below concluded that structure as a **side head** does not change what
+the language model answers. The next architecture makes topology part of the
+generated evidence: the model emits `<|struct|>` tokens, reports the observation,
+and answers from it. See [`docs/ARCHITECTURE.md`](docs/ARCHITECTURE.md) and
+`scripts/train/train_structure_vlm.py`.
+
 ## Repository layout
 
 | path | what |

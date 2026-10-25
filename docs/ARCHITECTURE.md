@@ -50,6 +50,23 @@ answer, so the model learns to *write* what it encoded.
 Stage 4 is where this differs most from ASPECT: its `Con` only checks counts, ours checks
 structure as well.
 
+## What is implemented now
+
+| piece | where | state |
+|---|---|---|
+| token format, binning, parsing | `src/pilot/tokens.py` | done, tested |
+| staging, masking, scoring | `src/pilot/evidence.py` | done, tested |
+| SFT loop + evidence heads | `src/pilot/sft.py` | done, needs a GPU to run |
+| corpus builder | `scripts/build/build_structure_qa.py` | done, CPU |
+| training CLI | `scripts/train/train_structure_vlm.py` | done |
+| `<uni>` reconstruction loss | `sft.py` | **off**: the corpus carries no encoder features yet |
+| `<cell>` count loss | `sft.py` | on when the corpus has `cell_counts` (it does) |
+| consistency RL (stage 4) | -- | not implemented |
+
+The honest gap: `<uni>` reconstruction is the one ASPECT loss we cannot compute
+yet, because it needs a frozen pathology encoder pass over every ROI. Adding it
+is a feature-extraction job, not a modelling decision.
+
 ## What the comparison must hold fixed
 
 | | ASPECT | this work |
